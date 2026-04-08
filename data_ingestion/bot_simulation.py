@@ -5,9 +5,12 @@ import os
 from kafka_producer import GPSProducer
 
 # --- BIẾN TOÀN CỤC MÔ PHỎNG VẬT LÝ ---
-RHO_MAX = 130  # Mật độ kẹt cứng: 130 xe/km
-V_MIN = 2.5    # Vận tốc trườn khi tắc đường (km/h)
-edge_vehicle_count = {} # RAM lưu trữ số lượng xe trên từng đường (Mô phỏng Redis nội bộ cho Bot)
+RHO_MAX = 130  
+V_MIN = 2.5    
+edge_vehicle_count = {} 
+
+# Danh sách các "Đích đến" giờ cao điểm (Khu văn phòng, trung tâm thương mại)
+ATTRACTOR_EDGES = [] 
 
 def load_map_graph(edges_filepath):
     print("Đang nạp bản đồ vào bộ nhớ...")
@@ -17,35 +20,52 @@ def load_map_graph(edges_filepath):
     graph = {}
     for edge in edges:
         edge_id = edge['edge_id']
-        edge_vehicle_count[edge_id] = 0  # Khởi tạo đếm xe = 0
+        edge_vehicle_count[edge_id] = 0  
         
         start = edge['start_node']['node_id']
         if start not in graph:
             graph[start] = []
         graph[start].append(edge)
+    
+    # CHUẨN THỰC TẾ: Chọn ra 5 con đường làm "Trung tâm" (ví dụ: các toà nhà văn phòng lớn)
+    global ATTRACTOR_EDGES
+    ATTRACTOR_EDGES = random.sample(edges, min(5, len(edges)))
+    print(f"Đã thiết lập {len(ATTRACTOR_EDGES)} trung tâm thu hút giao thông giờ cao điểm.")
         
     return edges, graph
 
 class Vehicle:
+    cached_edge_lengths = []
+
     def __init__(self, v_id, v_type, all_edges, graph):
         self.entity_id = v_id
         self.entity_type = v_type
         self.graph = graph
         self.all_edges = all_edges
-        self._spawn() # Gọi hàm sinh ra xe
+        
+        if not Vehicle.cached_edge_lengths:
+            Vehicle.cached_edge_lengths = [max(e['length_meters'], 1.0) for e in all_edges]
+            
+        self._spawn()
 
     def _spawn(self):
-        """Logic Khai tử & Tái sinh (Source and Sink)"""
-        # Random điểm xuất phát và điểm đến
-        self.current_edge = random.choice(self.all_edges)
-        self.target_edge = random.choice(self.all_edges)
+        """Logic Khai tử & Tái sinh"""
+        # Điểm xuất phát: Rải đều theo độ dài đường
+        self.current_edge = random.choices(self.all_edges, weights=Vehicle.cached_edge_lengths, k=1)[0]
+        
+        # --- BÍ QUYẾT TẠO KẸT XE TỰ NHIÊN ---
+        # 70% số xe (Bot) sẽ đổ dồn về 5 khu trung tâm. 30% đi linh tinh.
+        # Sự dồn dập này sẽ làm các con đường dẫn tới trung tâm tự động kẹt cứng!
+        if self.entity_type == "Bot" and random.random() < 0.70:
+            self.target_edge = random.choice(ATTRACTOR_EDGES)
+        else:
+            self.target_edge = random.choice(self.all_edges)
         
         self.latitude = self.current_edge['start_node']['lat']
         self.longitude = self.current_edge['start_node']['lon']
         self.progress_meters = 0.0
         self.speed = self.current_edge['max_speed_kmh']
         
-        # Đăng ký xe vào đoạn đường hiện tại
         edge_vehicle_count[self.current_edge['edge_id']] += 1
 
     def move(self):
@@ -53,7 +73,7 @@ class Vehicle:
         length_m = self.current_edge['length_meters']
         max_speed = self.current_edge['max_speed_kmh']
         
-        # --- 1. ÁP DỤNG CÔNG THỨC GREENSHIELDS ---
+        # --- 1. GREENSHIELDS TỰ NHIÊN (Không can thiệp nhân tạo) ---
         n_vehicles = edge_vehicle_count[edge_id]
         density = n_vehicles / (length_m / 1000) if length_m > 0 else 0
         
@@ -68,26 +88,23 @@ class Vehicle:
         
         # --- 2. XỬ LÝ KHI ĐI ĐẾN NGÃ TƯ ---
         if self.progress_meters >= length_m:
-            # Rút xe khỏi đường cũ
             edge_vehicle_count[edge_id] -= 1
             
-            # Kiểm tra xem đã tới đích chưa
             if self.current_edge['edge_id'] == self.target_edge['edge_id']:
-                self._spawn() # Hoàn thành nhiệm vụ -> Tái sinh xe mới
+                self._spawn() 
                 return
             
             end_node = self.current_edge['end_node']['node_id']
             next_edges = self.graph.get(end_node, [])
             
             if next_edges:
-                # --- 3. ĐỊNH TUYẾN THAM LAM (Greedy Routing) ---
+                # --- 3. ĐỊNH TUYẾN THAM LAM ---
                 target_lat = self.target_edge['start_node']['lat']
                 target_lon = self.target_edge['start_node']['lon']
                 
                 best_edge = next_edges[0]
                 min_dist = float('inf')
                 
-                # Tìm ngã rẽ có hướng gần với điểm đến nhất (tính bằng bình phương khoảng cách Euclidean để tiết kiệm CPU)
                 for edge in next_edges:
                     n_lat, n_lon = edge['end_node']['lat'], edge['end_node']['lon']
                     dist = (n_lat - target_lat)**2 + (n_lon - target_lon)**2
@@ -100,22 +117,20 @@ class Vehicle:
                 next_capacity = RHO_MAX * (next_length / 1000)
                 
                 if edge_vehicle_count[best_edge['edge_id']] >= next_capacity:
-                    # Đường phía trước kẹt cứng -> Đứng chờ ở mép ngã tư
+                    # Kẹt xe lùi: Đường trước mặt đầy, xe này phải đứng lại ở ngã tư,
+                    # chiếm chỗ của đường hiện tại -> làm đường hiện tại kẹt theo.
                     self.progress_meters = length_m
                     self.speed = 0.0
-                    edge_vehicle_count[edge_id] += 1 # Đăng ký lại vào đường cũ vì chưa thoát được
+                    edge_vehicle_count[edge_id] += 1 
                 else:
-                    # Đường thoáng -> Tiến vào đường mới
                     self.current_edge = best_edge
                     self.progress_meters = 0.0
                     self.latitude = self.current_edge['start_node']['lat']
                     self.longitude = self.current_edge['start_node']['lon']
                     edge_vehicle_count[self.current_edge['edge_id']] += 1
             else:
-                # Ngõ cụt -> Tái sinh
                 self._spawn()
         else:
-            # Nội suy tọa độ trên đoạn đường
             ratio = self.progress_meters / length_m
             lat1, lon1 = self.current_edge['start_node']['lat'], self.current_edge['start_node']['lon']
             lat2, lon2 = self.current_edge['end_node']['lat'], self.current_edge['end_node']['lon']
@@ -139,7 +154,7 @@ if __name__ == "__main__":
     
     producer = GPSProducer()
     
-    print("Đang khởi tạo 9.900 Bots và 100 Trucks với mô hình Vật lý giao thông...")
+    print("Đang khởi tạo 9.900 Bots và 100 Trucks...")
     vehicles = [Vehicle(f"Bot_{i:04d}", "Bot", all_edges, graph) for i in range(1, 9901)]
     vehicles.extend([Vehicle(f"Truck_{i:03d}", "Truck", all_edges, graph) for i in range(1, 101)])
     
