@@ -49,17 +49,21 @@ class Vehicle:
         self._spawn()
 
     def _spawn(self):
-        """Logic Khai tử & Tái sinh"""
-        # Điểm xuất phát: Rải đều theo độ dài đường
+        """Logic Khởi tạo xe lần đầu hoặc khi đã hoàn thành toàn bộ nhiệm vụ"""
         self.current_edge = random.choices(self.all_edges, weights=Vehicle.cached_edge_lengths, k=1)[0]
         
-        # --- BÍ QUYẾT TẠO KẸT XE TỰ NHIÊN ---
-        # 70% số xe (Bot) sẽ đổ dồn về 5 khu trung tâm. 30% đi linh tinh.
-        # Sự dồn dập này sẽ làm các con đường dẫn tới trung tâm tự động kẹt cứng!
-        if self.entity_type == "Bot" and random.random() < 0.70:
-            self.target_edge = random.choice(ATTRACTOR_EDGES)
+        # --- PHÂN TÁCH LOGIC TRUCK VÀ BOT ---
+        if self.entity_type == "Truck":
+            # Bài toán: 1000 khách / 100 xe -> Mỗi xe ôm 10 đơn hàng (10 đích đến)
+            self.customer_route = random.choices(self.all_edges, k=10)
+            self.current_route_index = 0
+            self.target_edge = self.customer_route[self.current_route_index]
         else:
-            self.target_edge = random.choice(self.all_edges)
+            # Bot thì chỉ cần 1 đích đến, 70% lao vào điểm nóng
+            if random.random() < 0.70:
+                self.target_edge = random.choice(ATTRACTOR_EDGES)
+            else:
+                self.target_edge = random.choice(self.all_edges)
         
         self.latitude = self.current_edge['start_node']['lat']
         self.longitude = self.current_edge['start_node']['lon']
@@ -73,32 +77,45 @@ class Vehicle:
         length_m = self.current_edge['length_meters']
         max_speed = self.current_edge['max_speed_kmh']
         
-        # --- 1. GREENSHIELDS TỰ NHIÊN (Không can thiệp nhân tạo) ---
+        # 1. Greenshields tính vận tốc
         n_vehicles = edge_vehicle_count[edge_id]
         density = n_vehicles / (length_m / 1000) if length_m > 0 else 0
-        
         if density >= RHO_MAX:
             self.speed = V_MIN
         else:
             self.speed = max(V_MIN, max_speed * (1 - (density / RHO_MAX)))
             
-        # Di chuyển
         speed_ms = self.speed * (1000 / 3600)
         self.progress_meters += speed_ms
         
-        # --- 2. XỬ LÝ KHI ĐI ĐẾN NGÃ TƯ ---
+        # 2. Xử lý khi đi hết đoạn đường hiện tại (đến ngã tư)
         if self.progress_meters >= length_m:
             edge_vehicle_count[edge_id] -= 1
             
+            # KIỂM TRA ĐÃ TỚI ĐÍCH CHƯA?
             if self.current_edge['edge_id'] == self.target_edge['edge_id']:
-                self._spawn() 
-                return
+                if self.entity_type == "Truck":
+                    # Đã giao xong cho khách hiện tại -> Chuyển sang khách tiếp theo
+                    self.current_route_index += 1
+                    if self.current_route_index < len(self.customer_route):
+                        # Lấy tọa độ khách tiếp theo, KHÔNG gọi _spawn() để giữ nguyên vị trí xe
+                        self.target_edge = self.customer_route[self.current_route_index]
+                        edge_vehicle_count[edge_id] += 1 # Xe vẫn đang đứng ở đây
+                        return
+                    else:
+                        # Giao xong cả 10 khách -> Quay về kho (hoặc làm ca mới)
+                        self._spawn() 
+                        return
+                else:
+                    # Là Bot -> Đi đến nơi thì tan biến và sinh ra bot mới
+                    self._spawn() 
+                    return
             
             end_node = self.current_edge['end_node']['node_id']
             next_edges = self.graph.get(end_node, [])
             
             if next_edges:
-                # --- 3. ĐỊNH TUYẾN THAM LAM ---
+                # 3. Định tuyến tham lam tới mục tiêu (target_edge)
                 target_lat = self.target_edge['start_node']['lat']
                 target_lon = self.target_edge['start_node']['lon']
                 
@@ -112,13 +129,11 @@ class Vehicle:
                         min_dist = dist
                         best_edge = edge
                 
-                # --- 4. GATEKEEPING TẠI NGÃ TƯ ---
+                # 4. Gatekeeping tại ngã tư
                 next_length = best_edge['length_meters']
                 next_capacity = RHO_MAX * (next_length / 1000)
                 
                 if edge_vehicle_count[best_edge['edge_id']] >= next_capacity:
-                    # Kẹt xe lùi: Đường trước mặt đầy, xe này phải đứng lại ở ngã tư,
-                    # chiếm chỗ của đường hiện tại -> làm đường hiện tại kẹt theo.
                     self.progress_meters = length_m
                     self.speed = 0.0
                     edge_vehicle_count[edge_id] += 1 
@@ -137,6 +152,7 @@ class Vehicle:
             self.latitude = lat1 + (lat2 - lat1) * ratio
             self.longitude = lon1 + (lon2 - lon1) * ratio
 
+    # Giữ nguyên hàm to_json_message...
     def to_json_message(self):
         return {
             "entity_id": self.entity_id,
