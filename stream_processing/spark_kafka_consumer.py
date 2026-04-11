@@ -19,7 +19,7 @@ from pyspark.sql.types import (
 )
 
 from map_matching import MapMatcher
-from redis_writer import RedisWriter
+from redis_manager import RedisWriter
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
