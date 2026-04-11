@@ -41,7 +41,7 @@ WINDOW_DURATION   = "30 seconds"   # cửa sổ tổng hợp 30s
 SLIDE_DURATION    = "10 seconds"   # trượt mỗi 10s
 
 # Ngưỡng phát hiện tắc đường (km/h)
-CONGESTION_THRESHOLD_KMH = 10.0
+CONGESTION_THRESHOLD_KMH = 5.0
 
 # ─── Schema của message GPS từ Kafka ─────────────────────────────────────────
 GPS_SCHEMA = StructType([
