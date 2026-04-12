@@ -14,7 +14,7 @@ logger = logging.getLogger("RedisWriter")
 
 class RedisWriter:
     """
-    Wrapper đơn giản để ghi / đọc trạng thái edge vào Redis.
+    Wrapper đơn giản  để ghi / đọc trạng thái edge vào Redis.
 
     Thiết kế:
     - Dùng SET + EXPIRE thay vì HSET để dễ serialize JSON phức tạp
