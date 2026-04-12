@@ -32,6 +32,8 @@ services:
     image: mongo:6.0
     ports:
       - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password123
+    # environment:
+      #MONGO_INITDB_ROOT_USERNAME: admin
+      #MONGO_INITDB_ROOT_PASSWORD: password123 
+    # Bỏ phần environment (User/Pass) để tránh lỗi keyFile khi chạy Replica Set
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
