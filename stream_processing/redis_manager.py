@@ -17,7 +17,7 @@ class RedisWriter:
     Wrapper đơn giản  để ghi / đọc trạng thái edge vào Redis.
 
     Thiết kế:
-    - Dùng SET + EXPIRE thay vì HSET để dễ serialize JSON phức tạp
+    - Dùng SET + EXPIRE thay  vì HSET để dễ serialize JSON phức tạp
     - Hỗ trợ pipeline ghi nhiều edge một lúc (pipeline_set_many)
     - Tự retry kết nối nếu Redis chưa sẵn sàng
     """

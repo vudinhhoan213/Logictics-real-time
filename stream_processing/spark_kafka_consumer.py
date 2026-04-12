@@ -87,7 +87,7 @@ match_to_edge_udf = udf(_match_to_edge, StringType())
 def write_edge_stats_to_redis(batch_df, batch_id: int):
     """
     foreachBatch callback:
-    - Nhận DataFrame đã được tổng hợp theo edge + time window
+    - Nhận DataFrame đã được  tổng hợp theo edge + time window
     - Tính estimated_travel_time
     - Ghi vào Redis với key: edge:{edge_id}
     """

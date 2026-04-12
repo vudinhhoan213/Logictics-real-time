@@ -13,7 +13,7 @@ logger = logging.getLogger("MapMatcher")
 
 class MapMatcher:
     """
-    Snap GPS tọa độ vào edge  gần nhất.
+    Snap GPS tọa độ vào  edge  gần nhất.
     Load dữ liệu từ edges_schema.json — cùng file mà bot_simulation.py dùng.
     """
 
