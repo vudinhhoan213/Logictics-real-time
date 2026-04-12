@@ -28,12 +28,10 @@ services:
       - "6379:6379"
     command: redis-server --save 60 1 --loglevel warning
 
-  
   mongodb:
     image: mongo:6.0
-    container_name: mongodb_traffic
-    restart: always
     ports:
       - "27017:27017"
-    # Bỏ phần environment (User/Pass) để tránh lỗi keyFile khi chạy Replica Set
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: password123
