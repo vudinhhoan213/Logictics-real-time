@@ -4,7 +4,9 @@ FROM python:3.9-slim
 # Đặt thư mục làm việc trong container
 WORKDIR /app
 
-# Cài đặt thư viện cần thiết (nếu bạn có requirements.txt thì copy vào và pip install -r)
+# Ép Python in log ra ngay lập tức, không dùng bộ đệm
+ENV PYTHONUNBUFFERED=1
+
 RUN pip install confluent-kafka
 
 # Copy thư mục data (chứa edges_schema.json) và thư mục code vào container

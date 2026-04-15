@@ -6,7 +6,7 @@ Redis Writer
 import json
 import logging
 from typing import Dict, Any, Optional, List
-
+import os
 import redis
 
 logger = logging.getLogger("RedisWriter")

@@ -24,3 +24,11 @@ class RouteOptimizer:
             "optimized_customer_order": best_order,
             "new_assigned_route": new_route
         }
+#####################################################################################
+import time
+
+if __name__ == "__main__":
+    print("GA Optimizer Service is running...")
+    while True:
+        time.sleep(10) # Dừng 10 giây rồi lặp lại, giữ cho container sống
+#####################################################################################

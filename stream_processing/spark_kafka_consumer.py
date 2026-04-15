@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger("StreamProcessor")
 
 # ─── Cấu hình ─────────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BROKER", "localhost:9092")
 KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "gps_stream")
 REDIS_HOST              = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT              = int(os.getenv("REDIS_PORT", 6379))

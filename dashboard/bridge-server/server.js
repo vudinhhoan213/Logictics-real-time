@@ -12,6 +12,7 @@ const io = new Server(server, {
     cors: { origin: "http://localhost:5173", methods: ["GET", "POST"] }
 });
 
+/*
 // Kết nối MongoDB
 mongoose.connect('mongodb://127.0.0.1:27017/traffic_system?directConnection=true')
   .then(() => {
@@ -20,6 +21,20 @@ mongoose.connect('mongodb://127.0.0.1:27017/traffic_system?directConnection=true
   .catch(err => {
     console.error('Lỗi kết nối MongoDB:', err.message);
   });
+  */
+
+// --- ĐOẠN CODE MỚI CẦN THAY THẾ ---
+// Lấy địa chỉ từ biến môi trường của Docker, nếu chạy ngoài thì dùng 127.0.0.1
+const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/traffic_system?directConnection=true';
+
+mongoose.connect(mongoUri)
+  .then(() => {
+    console.log(`Đã kết nối MongoDB thành công tại: ${mongoUri}`);
+  })
+  .catch(err => {
+    console.error('Lỗi kết nối MongoDB:', err.message);
+  });
+// ----------------------------------
 
 // Schema
 const RouteSchema = new mongoose.Schema({

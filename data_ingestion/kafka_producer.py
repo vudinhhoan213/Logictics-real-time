@@ -1,20 +1,12 @@
 import json
-from confluent_kafka import Producer
-import time
 import os
-
-# Trong class GPSProducer, hàm __init__:
-conf = {
-    # Ưu tiên lấy biến môi trường KAFKA_BROKER, nếu không có thì fallback về localhost
-    'bootstrap.servers': os.getenv('KAFKA_BROKER', 'localhost:9092'),
-    'client.id': 'python-producer'
-}
+from confluent_kafka import Producer
 
 class GPSProducer:
     def __init__(self):
-        # Kết nối tới Kafka ảo đang chạy ở Bước 1
+        # Ưu tiên lấy IP từ mạng ảo của Docker, nếu chạy ngoài thì dùng localhost
         conf = {
-            'bootstrap.servers': 'localhost:9092',
+            'bootstrap.servers': os.getenv('KAFKA_BROKER', 'localhost:9092'),
             'client.id': 'python-producer'
         }
         self.producer = Producer(conf)
@@ -37,22 +29,3 @@ class GPSProducer:
 
     def flush(self):
         self.producer.flush()
-
-# --- CHẠY THỬ XEM CÓ LỖI KHÔNG ---
-if __name__ == "__main__":
-    my_producer = GPSProducer()
-    
-    # 1 data mẫu đúng y hệt file Docx
-    test_data = {
-        "entity_id": "Bot_0001",
-        "entity_type": "Bot",
-        "latitude": 21.012345,
-        "longitude": 105.812345,
-        "speed": 35.5,
-        "timestamp": int(time.time() * 1000)
-    }
-    
-    print("Đang bắn thử 1 tọa độ lên Kafka...")
-    my_producer.produce_message(test_data)
-    my_producer.flush()
-    print("THÀNH CÔNG! Đường ống Kafka đã thông suốt!")

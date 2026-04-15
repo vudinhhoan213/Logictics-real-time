@@ -1,14 +1,15 @@
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
 COPY dashboard/frontend/package.json ./
-RUN npm install
+
+RUN npm install && npm install kafkajs redis
 
 COPY dashboard/frontend/ ./
 
 # Expose port của Vite (thường là 5173)
-EXPOSE 5173
+EXPOSE 5000
 
 # Chạy Vite ở chế độ host để map được port ra ngoài máy thật
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
