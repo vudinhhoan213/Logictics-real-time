@@ -1,2 +1,6 @@
 # Tự tạo thư viên riêng ở máy mỗi người
 venv
+node_modules
+__pycache__
+
+package-lock.json
