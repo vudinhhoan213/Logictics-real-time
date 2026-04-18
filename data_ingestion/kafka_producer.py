@@ -1,6 +1,14 @@
 import json
 from confluent_kafka import Producer
 import time
+import os
+
+# Trong class GPSProducer, hàm __init__:
+conf = {
+    # Ưu tiên lấy biến môi trường KAFKA_BROKER, nếu không có thì fallback về localhost
+    'bootstrap.servers': os.getenv('KAFKA_BROKER', 'localhost:9092'),
+    'client.id': 'python-producer'
+}
 
 class GPSProducer:
     def __init__(self):

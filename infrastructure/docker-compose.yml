@@ -32,6 +32,79 @@ services:
     image: mongo:6.0
     ports:
       - "27017:27017"
+    # environment:
+      #MONGO_INITDB_ROOT_USERNAME: admin
+      #MONGO_INITDB_ROOT_PASSWORD: password123 
+    # Bỏ phần environment (User/Pass) để tránh lỗi keyFile khi chạy Replica Set
+    #command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+  
+  #Giả lập dữ liệu & Đẩy vào Kafka
+  data_ingestion:
+    build:
+      context: ../  # Trỏ ra thư mục gốc để đọc được Dockerfile và thư mục data
+      dockerfile: Dockerfile.data_ingestion
+    container_name: bot_simulator
+    depends_on:
+      - kafka  # Đợi Kafka khởi động xong mới chạy Bot
     environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password123
+      # Truyền địa chỉ mạng nội bộ của Kafka vào cho script Python
+      - KAFKA_BROKER=kafka:29092
+
+  # Spark Streaming xử lý dữ liệu 
+  stream_processing:
+    build:
+      context: ../
+      dockerfile: Dockerfile.stream_processing
+    container_name: service_spark_processor
+    depends_on:
+      - kafka
+      - redis
+    environment:
+      - KAFKA_BROKER=kafka:29092
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+
+  # Thuật toán GA tìm đường
+  route_optimization:
+    build:
+      context: ../
+      dockerfile: Dockerfile.route_optimization
+    container_name: service_ga_optimizer
+    depends_on:
+      - kafka
+      - redis
+      - mongodb
+    environment:
+      - KAFKA_BROKER=kafka:29092
+      - REDIS_HOST=redis
+      - MONGO_URI=mongodb://mongodb:27017/
+
+  # Backend Socket.io
+  dashboard_backend:
+    build:
+      context: ../
+      dockerfile: Dockerfile.backend
+    container_name: service_dashboard_backend
+    depends_on:
+      - redis
+      - mongodb
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_HOST=redis
+      - MONGO_URI=mongodb://mongodb:27017/
+      - PORT=5000
+
+  # Frontend ReactJS (Dashboard)
+  dashboard_frontend:
+    build:
+      context: ../
+      dockerfile: Dockerfile.frontend
+    container_name: service_dashboard_frontend
+    depends_on:
+      - dashboard_backend
+    ports:
+      - "5173:5173"
+    environment:
+      # Báo cho frontend biết API Backend nằm ở đâu
+      - VITE_API_URL=http://localhost:5000

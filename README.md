@@ -29,3 +29,9 @@ python data_ingestion/bot_simulation.py
 # Mở Terminal mới và chạy để đưa ra 10 mess từ Kafka
 cd .\infrastructure\
 docker-compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic gps_stream --max-messages 10
+
+### Lệnh chạy tất cả qua Docker
+# Vào đúng thư mục chứa file docker-compose.yml
+cd .\infrastructure\
+# Tạo và chạy các Container
+docker-compose up -d --build

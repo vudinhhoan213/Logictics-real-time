@@ -1,0 +1,18 @@
+# Bỏ qua thư viện Node.js trong frontend và bridge-server
+node_modules/
+**/node_modules/
+
+# Bỏ qua các file khóa (để máy mỗi người tự sinh khi npm install)
+package-lock.json
+yarn.lock
+
+# Bỏ qua thư mục build của React/Vite (thường là dist hoặc build)
+dist/
+build/
+
+# Bỏ qua các file môi trường, cấu hình riêng
+.env
+.env.local
+
+# Bỏ qua các file rác của VS Code
+.vscode/
