@@ -18,8 +18,7 @@ from pyspark.sql.types import (
     DoubleType, LongType, TimestampType
 )
 
-from map_matching  import MapMatcher
-from redis_manager  import RedisWriter
+
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -29,11 +28,11 @@ logging.basicConfig(
 logger = logging.getLogger("StreamProcessor")
 
 # ─── Cấu hình ─────────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
 KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "gps_stream")
-REDIS_HOST              = os.getenv("REDIS_HOST", "localhost")
+REDIS_HOST              = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT              = int(os.getenv("REDIS_PORT", 6379))
-EDGES_JSON              = os.getenv("EDGES_JSON", "../data/edges_schema.json")  # file do map_processor.py tạo ra
+EDGES_JSON              = os.getenv("EDGES_JSON", "/app/data/edges_schema.json")# file do map_processor.py tạo ra
 
 # Tần suất cập nhật Redis (giây)
 WATERMARK_DELAY   = "10 seconds"   # chấp nhận late data tới 10s
@@ -59,6 +58,9 @@ GPS_SCHEMA = StructType([
 _matcher_broadcast = None
 
 def get_map_matcher():
+
+    from map_matching  import MapMatcher
+    
     global _matcher_broadcast
     if _matcher_broadcast is None:
         _matcher_broadcast = MapMatcher(EDGES_JSON)
@@ -85,53 +87,55 @@ match_to_edge_udf = udf(_match_to_edge, StringType())
 
 # ─── Hàm ghi batch vào Redis ──────────────────────────────────────────────────
 def write_edge_stats_to_redis(batch_df, batch_id: int):
-    """
-    foreachBatch callback:
-    - Nhận DataFrame đã được  tổng hợp theo edge + time window
-    - Tính estimated_travel_time
-    - Ghi vào Redis với key: edge:{edge_id}
-    """
-    if batch_df.rdd.isEmpty():
-        logger.info(f"[Batch {batch_id}] Rỗng, bỏ qua.")
+    from redis_manager import RedisWriter
+
+    if batch_df.isEmpty():
+        logger.info(f"[Batch {batch_id}] Trống, bỏ qua.")
         return
 
-    logger.info(f"[Batch {batch_id}] Bắt đầu ghi Redis...")
+    logger.info(f"[Batch {batch_id}] Bắt đầu xử lý batch...")
 
-    rows = batch_df.collect()
-    writer = RedisWriter(host=REDIS_HOST, port=REDIS_PORT)
+    def write_partition(partition):
+        writer = None
+        try:
+            writer = RedisWriter(host=REDIS_HOST, port=REDIS_PORT)
+            records_to_write = []
 
-    written = 0
-    for row in rows:
-        edge_id   = row["edge_id"]
-        avg_speed = row["avg_speed"]       # km/h
-        veh_count = row["vehicle_count"]
-        distance  = row["edge_length_m"]   # metres (từ graph)
+            for row in partition:
+                edge_id   = row["edge_id"]
+                avg_speed = row["avg_speed"]
+                distance  = row["edge_length_m"]
 
-        if edge_id == "UNKNOWN" or avg_speed is None or avg_speed <= 0:
-            continue
+                if edge_id == "UNKNOWN" or avg_speed is None or avg_speed <= 0:
+                    continue
 
-        # Tính thời gian di chuyển ước lượng: t = d / v (giây)
-        estimated_travel_time = (distance / 1000.0) / avg_speed * 3600.0
+                estimated_travel_time = (distance / 1000.0) / avg_speed * 3600.0
 
-        # Gắn nhãn tắc đường
-        is_congested = avg_speed < CONGESTION_THRESHOLD_KMH
+                payload = {
+                    "edge_id": edge_id,
+                    "avg_speed": round(avg_speed, 2),
+                    "vehicle_count": int(row["vehicle_count"]),
+                    "distance": round(distance, 1),
+                    "estimated_travel_time": round(estimated_travel_time, 2),
+                    "is_congested": avg_speed < CONGESTION_THRESHOLD_KMH,
+                    "updated_at": row["window_end"].isoformat() if row["window_end"] else ""
+                }
 
-        payload = {
-            "edge_id":                edge_id,
-            "avg_speed":              round(avg_speed, 2),
-            "vehicle_count":          int(veh_count),
-            "distance":               round(distance, 1),
-            "estimated_travel_time":  round(estimated_travel_time, 2),
-            "is_congested":           is_congested,
-            "updated_at":             row["window_end"].isoformat()
-                                      if row.get("window_end") else "",
-        }
+                records_to_write.append(payload)
 
-        writer.set_edge_state(edge_id, payload, ttl_seconds=120)
-        written += 1
+            if records_to_write:
+                writer.pipeline_set_many(records_to_write, ttl=120)
 
-    logger.info(f"[Batch {batch_id}] Đã ghi {written} edges vào Redis.")
-    writer.close()
+        except Exception as e:
+            logger.error(f"[Batch {batch_id}] Lỗi partition: {e}", exc_info=True)
+        finally:
+            if writer:
+                writer.close()
+
+    # 🔥 QUAN TRỌNG: chạy song song theo partition
+    batch_df.foreachPartition(write_partition)
+
+    logger.info(f"[Batch {batch_id}] Ghi Redis xong.")
 
 
 # ─── Hàm bổ sung edge_length từ graph (broadcast) ────────────────────────────
@@ -150,29 +154,31 @@ get_edge_length_udf = udf(_get_edge_length, DoubleType())
 def main():
     logger.info("Khởi động PySpark Structured Streaming...")
 
-    spark = (
-        SparkSession.builder
-        .appName("LogisticsStreamProcessing")
-        # Kafka connector (cần jar trong classpath hoặc --packages)
-        .config(
-            "spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
-        )
-        # Tắt UI nếu chạy headless
-        .config("spark.ui.enabled", "false")
-        .getOrCreate()
-    )
+    spark = (SparkSession.builder
+    .appName("LogisticsProcessing")
+    .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.13:3.5.0")
+    .config("spark.executor.memory", "1g") # Giới hạn để không bị tràn RAM
+    .config("spark.driver.memory", "1g")
+    .getOrCreate())
+    
+    spark.sparkContext.addPyFile("/app/stream_processing/map_matching.py")
+    spark.sparkContext.addPyFile("/app/stream_processing/redis_manager.py")
+
     spark.sparkContext.setLogLevel("WARN")
+
+    from map_matching  import MapMatcher
+    from redis_manager  import RedisWriter
 
     # ── 1. Đọc từ Kafka ───────────────────────────────────────────────────────
     raw_df = (
-        spark.readStream
-        .format("kafka")
-        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
-        .option("subscribe", KAFKA_TOPIC)
-        .option("startingOffsets", "latest")
-        .option("failOnDataLoss", "false")
-        .load()
+    spark.readStream
+    .format("kafka")
+    .option("kafka.bootstrap.servers", "kafka:29092")
+    .option("subscribe", "gps_stream")
+    .option("startingOffsets", "latest")
+    .option("failOnDataLoss", "false")
+    .option("maxOffsetsPerTrigger", 200)
+    .load()
     )
 
     # ── 2. Parse JSON ─────────────────────────────────────────────────────────
@@ -219,10 +225,11 @@ def main():
     )
 
     # ── 5. Bổ sung edge_length từ graph ──────────────────────────────────────
-    enriched_df = aggregated_df.withColumn(
-        "edge_length_m",
-        get_edge_length_udf(col("edge_id"))
-    )
+    enriched_df = (
+    aggregated_df
+    .withColumn("edge_length_m", get_edge_length_udf(col("edge_id")))
+    .repartition(4)
+)
 
     # ── 6. Ghi vào Redis qua foreachBatch ─────────────────────────────────────
     query = (
@@ -230,13 +237,12 @@ def main():
         .outputMode("update")
         .foreachBatch(write_edge_stats_to_redis)
         .option("checkpointLocation", "/tmp/spark_checkpoint/gps_stream")
-        .trigger(processingTime="10 seconds")
+        .trigger(processingTime="60 seconds")
         .start()
     )
 
     logger.info("Stream đang chạy. Nhấn Ctrl+C để dừng.")
     query.awaitTermination()
-
 
 if __name__ == "__main__":
     main()

@@ -1,14 +1,14 @@
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
-COPY dashboard/frontend/package.json ./
+COPY package*.json ./
 RUN npm install
 
-COPY dashboard/frontend/ ./
+COPY . .
 
-# Expose port của Vite (thường là 5173)
-EXPOSE 5173
+# Expose port của Vite (thường là 4000)
+EXPOSE 4000
 
 # Chạy Vite ở chế độ host để map được port ra ngoài máy thật
-CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+CMD ["node", "server.js"]
