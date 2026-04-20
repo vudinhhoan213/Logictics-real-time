@@ -1,2 +1,7 @@
 # Tự tạo thư viên riêng ở máy mỗi người
 venv
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
