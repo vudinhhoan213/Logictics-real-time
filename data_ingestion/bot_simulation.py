@@ -54,10 +54,24 @@ class Vehicle:
         
         # --- PHÂN TÁCH LOGIC TRUCK VÀ BOT ---
         if self.entity_type == "Truck":
-            # Bài toán: 1000 khách / 100 xe -> Mỗi xe ôm 10 đơn hàng (10 đích đến)
-            self.customer_route = random.choices(self.all_edges, k=10)
+            # Bốc 10 đường ngẫu nhiên
+            raw_edges = random.choices(self.all_edges, k=10)
+            
+            self.customer_route = []          # Dành để xuất JSON 
+            self._internal_route_edges = []   # Dành cho logic chạy ngầm của xe tải
+            
+            for idx, edge in enumerate(raw_edges):
+                # 1. Format chuẩn JSON cho khách hàng
+                self.customer_route.append({
+                    "cust_id": f"Cust_{self.entity_id}_{idx+1}",
+                    "latitude": edge['start_node']['lat'],
+                    "longitude": edge['start_node']['lon']
+                })
+                # 2. Lưu object bản đồ vào mảng ẩn để xe biết đường chạy
+                self._internal_route_edges.append(edge)
+            
             self.current_route_index = 0
-            self.target_edge = self.customer_route[self.current_route_index]
+            self.target_edge = self._internal_route_edges[self.current_route_index]
         else:
             # Bot thì chỉ cần 1 đích đến, 70% lao vào điểm nóng
             if random.random() < 0.70:
@@ -99,7 +113,7 @@ class Vehicle:
                     self.current_route_index += 1
                     if self.current_route_index < len(self.customer_route):
                         # Lấy tọa độ khách tiếp theo, KHÔNG gọi _spawn() để giữ nguyên vị trí xe
-                        self.target_edge = self.customer_route[self.current_route_index]
+                        self.target_edge = self._internal_route_edges[self.current_route_index]
                         edge_vehicle_count[edge_id] += 1 # Xe vẫn đang đứng ở đây
                         return
                     else:
