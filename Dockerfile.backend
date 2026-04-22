@@ -1,0 +1,14 @@
+FROM node:20-alpine
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm install
+
+COPY . .
+
+# Expose port của Vite (thường là 4000)
+EXPOSE 4000
+
+# Chạy Vite ở chế độ host để map được port ra ngoài máy thật
+CMD ["node", "server.js"]

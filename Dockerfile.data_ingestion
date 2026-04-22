@@ -1,0 +1,15 @@
+# Sử dụng image Python nhẹ
+FROM python:3.9-slim
+
+# Đặt thư mục làm việc trong container
+WORKDIR /app
+
+# Cài đặt thư viện cần thiết (nếu bạn có requirements.txt thì copy vào và pip install -r)
+RUN pip install confluent-kafka
+
+# Copy thư mục data (chứa edges_schema.json) và thư mục code vào container
+COPY data/ ./data/
+COPY data_ingestion/ ./data_ingestion/
+
+# Lệnh khởi chạy tự động khi container bật lên
+CMD ["python", "data_ingestion/bot_simulation.py"]
