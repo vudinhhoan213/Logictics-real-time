@@ -1,7 +1,7 @@
 # Tự tạo thư viên riêng ở máy mỗi người
 venv
+node_modules
+__pycache__
+spark_checkpoints
 
-# Python cache files
-__pycache__/
-*.py[cod]
-*$py.class
+package-lock.json
