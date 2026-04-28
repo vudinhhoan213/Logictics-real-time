@@ -21,6 +21,11 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7.0-alpine
@@ -42,6 +47,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   #Giả lập dữ liệu & Đẩy vào Kafka
   data_ingestion:
@@ -54,6 +64,12 @@ services:
     environment:
       # Truyền địa chỉ mạng nội bộ của Kafka vào cho script Python
       - KAFKA_BROKER=kafka:29092
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Spark Streaming xử lý dữ liệu
   stream_processing:
@@ -75,6 +91,12 @@ services:
       - REDIS_PORT=6379
       - EDGES_JSON=/app/data/edges_schema.json
 
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   # Thuật toán GA tìm đường
   route_optimization:
     build:
@@ -89,6 +111,12 @@ services:
       - KAFKA_BROKER=kafka:29092
       - REDIS_HOST=redis
       - MONGO_URI=mongodb://mongodb:27017/
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   # Backend Socket.io
   dashboard_backend:

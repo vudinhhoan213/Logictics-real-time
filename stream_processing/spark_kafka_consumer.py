@@ -18,8 +18,6 @@ from pyspark.sql.types import (
     DoubleType, LongType, TimestampType
 )
 
-
-
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -36,8 +34,8 @@ EDGES_JSON              = os.getenv("EDGES_JSON", "/app/data/edges_schema.json")
 
 # Tần suất cập nhật Redis (giây)
 WATERMARK_DELAY   = "10 seconds"   # chấp nhận late data tới 10s
-WINDOW_DURATION   = "30 seconds"   # cửa sổ tổng hợp 30s
-SLIDE_DURATION    = "10 seconds"   # trượt mỗi 10s
+WINDOW_DURATION   = "10 seconds"   # cửa sổ tổng hợp 10s
+SLIDE_DURATION    = "3 seconds"   # trượt mỗi 3s
 
 # Ngưỡng phát hiện tắc đường (km/h)
 CONGESTION_THRESHOLD_KMH = 5.0
@@ -177,7 +175,7 @@ def main():
     .option("subscribe", "gps_stream")
     .option("startingOffsets", "latest")
     .option("failOnDataLoss", "false")
-    .option("maxOffsetsPerTrigger", 200)
+    .option("maxOffsetsPerTrigger", 5000)
     .load()
     )
 
@@ -228,7 +226,7 @@ def main():
     enriched_df = (
     aggregated_df
     .withColumn("edge_length_m", get_edge_length_udf(col("edge_id")))
-    .repartition(4)
+    .repartition(8)
 )
 
     # ── 6. Ghi vào Redis qua foreachBatch ─────────────────────────────────────
@@ -237,7 +235,7 @@ def main():
         .outputMode("update")
         .foreachBatch(write_edge_stats_to_redis)
         .option("checkpointLocation", "/tmp/spark_checkpoint/gps_stream")
-        .trigger(processingTime="60 seconds")
+        .trigger(processingTime="3 seconds")
         .start()
     )
 
