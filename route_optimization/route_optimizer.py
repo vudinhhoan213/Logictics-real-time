@@ -3,21 +3,22 @@ route_optimizer.py
 
 Integration layer cho module Route Optimization.
 
-Vai tro:
-- Lay vehicle_doc tu MongoDB.
-- Lay traffic state tu Redis thong qua optimizer_input_adapter.py.
-- Kiem tra co can reroute hay khong.
-- Neu can, chay Genetic Algorithm.
-- Cap nhat ket qua route moi vao MongoDB.
+Backend dashboard hien dang nghe MongoDB collection `assigned_routes`
+va emit event `route_optimized` voi format:
+    {
+        path: updatedData.new_assigned_route,
+        time: updatedData.estimated_total_travel_time
+    }
 
-File nay dong vai tro "bo dieu phoi" cua module C.
+Vi vay file nay ghi cac field:
+- vehicle_id
+- new_assigned_route
+- estimated_total_travel_time
 
-Cau truc khuyen dung trong folder route_optimization:
-
-    route_optimization/
-    ├── optimizer_input_adapter.py
-    ├── genetic_algorithm.py
-    └── route_optimizer.py
+Ghi chu:
+- GA hien tai moi toi uu thu tu khach hang (`optimized_customer_order`).
+- GA chua sinh edge route moi that su tu graph.
+- Tam thoi `new_assigned_route` dung `old_assigned_route` de dashboard co path edge_id hop le.
 """
 
 from typing import Any, Dict, Optional
@@ -69,6 +70,7 @@ def build_error_response(vehicle_id: Optional[str], error: Exception) -> Dict[st
 def build_success_response(
     vehicle_id: str,
     old_assigned_route: list,
+    new_assigned_route: list,
     ga_result: Dict[str, Any],
     mongo_updated: bool,
 ) -> Dict[str, Any]:
@@ -76,9 +78,10 @@ def build_success_response(
         "status": "optimized",
         "vehicle_id": vehicle_id,
         "old_assigned_route": old_assigned_route,
+        "new_assigned_route": new_assigned_route,
+        "estimated_total_travel_time": ga_result.get("estimated_total_cost", 0),
         "optimized_customer_order": ga_result.get("optimized_customer_order", []),
         "optimized_customers": ga_result.get("optimized_customers", []),
-        "estimated_total_cost": ga_result.get("estimated_total_cost"),
         "generation_count": ga_result.get("generation_count"),
         "optimized": True,
         "updated_mongo": mongo_updated,
@@ -86,57 +89,57 @@ def build_success_response(
     }
 
 
+def build_new_assigned_route(
+    old_assigned_route: list,
+    ga_result: Dict[str, Any],
+    opt_input: Dict[str, Any],
+) -> list:
+    """
+    Tao route edge_id moi cho dashboard.
+
+    Hien tai:
+    - GA chi tra ve optimized_customer_order.
+    - Chua co module convert customer order -> shortest path edge list.
+    - Do do tam thoi tra ve old_assigned_route de dashboard nhan duoc
+      new_assigned_route hop le va ve duoc Polyline.
+
+    Sau nay nang cap:
+    - Load graph edges_schema.json.
+    - Map customer toa do -> nearest edge/node.
+    - Dung NetworkX shortest_path voi cost tu Redis.
+    - Tra ve list edge_id moi.
+    """
+    if old_assigned_route:
+        return old_assigned_route
+
+    return []
+
+
 def save_optimization_result_to_mongo(
     mongo_collection: Any,
     vehicle_id: str,
     ga_result: Dict[str, Any],
     old_assigned_route: list,
-) -> bool:
-    """
-    Cap nhat ket qua optimization vao MongoDB.
-
-    GA hien tai toi uu thu tu khach hang. Khi chua co graph/pathfinding that,
-    file nay chua ghi de assigned_route bang edge route moi.
-    """
-    optimized_customer_order = ga_result.get("optimized_customer_order", [])
-
-    update_doc = {
-        "$set": {
-            "optimized_customer_order": optimized_customer_order,
-            "optimization_result": {
-                "old_assigned_route": old_assigned_route,
-                "optimized_customer_order": optimized_customer_order,
-                "estimated_total_cost": ga_result.get("estimated_total_cost"),
-                "generation_count": ga_result.get("generation_count"),
-                "optimized_at": now_ms(),
-                "algorithm": "Genetic Algorithm",
-            },
-            "last_optimized_at": now_ms(),
-            "route_status": "optimized",
-        }
-    }
-
-    result = mongo_collection.update_one(
-        {"vehicle_id": vehicle_id},
-        update_doc,
-    )
-
-    return result.modified_count > 0 or result.matched_count > 0
-
-
-def save_edge_route_to_mongo(
-    mongo_collection: Any,
-    vehicle_id: str,
     new_assigned_route: list,
-    ga_result: Dict[str, Any],
-    old_assigned_route: list,
 ) -> bool:
     """
-    Dung ham nay khi da co new_assigned_route that su la list edge_id.
+    Cap nhat ket qua optimization vao MongoDB theo schema dashboard.
+
+    Collection ky vong:
+        assigned_routes
+
+    Fields quan trong cho backend/frontend:
+        vehicle_id
+        new_assigned_route
+        estimated_total_travel_time
     """
+    estimated_total_travel_time = ga_result.get("estimated_total_cost", 0)
+
     update_doc = {
         "$set": {
-            "assigned_route": new_assigned_route,
+            "vehicle_id": vehicle_id,
+            "new_assigned_route": new_assigned_route,
+            "estimated_total_travel_time": estimated_total_travel_time,
             "optimized_customer_order": ga_result.get("optimized_customer_order", []),
             "optimization_result": {
                 "old_assigned_route": old_assigned_route,
@@ -146,6 +149,7 @@ def save_edge_route_to_mongo(
                 "generation_count": ga_result.get("generation_count"),
                 "optimized_at": now_ms(),
                 "algorithm": "Genetic Algorithm",
+                "note": "new_assigned_route currently falls back to old_assigned_route until graph pathfinding is implemented",
             },
             "last_optimized_at": now_ms(),
             "route_status": "optimized",
@@ -155,9 +159,14 @@ def save_edge_route_to_mongo(
     result = mongo_collection.update_one(
         {"vehicle_id": vehicle_id},
         update_doc,
+        upsert=True,
     )
 
-    return result.modified_count > 0 or result.matched_count > 0
+    return (
+        getattr(result, "modified_count", 0) > 0
+        or getattr(result, "matched_count", 0) > 0
+        or getattr(result, "upserted_id", None) is not None
+    )
 
 
 def optimize_vehicle(
@@ -171,14 +180,6 @@ def optimize_vehicle(
     force: bool = False,
     random_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """
-    Toi uu route cho mot xe.
-
-    Return status:
-    - skipped: khong can toi uu
-    - optimized: da chay GA
-    - error: loi validate/chay thuat toan/ghi DB
-    """
     vehicle_id = str(vehicle_doc.get("vehicle_id", ""))
 
     try:
@@ -210,6 +211,12 @@ def optimize_vehicle(
             random_seed=random_seed,
         )
 
+        new_assigned_route = build_new_assigned_route(
+            old_assigned_route=old_assigned_route,
+            ga_result=ga_result,
+            opt_input=opt_input,
+        )
+
         mongo_updated = False
         if mongo_collection is not None:
             mongo_updated = save_optimization_result_to_mongo(
@@ -217,11 +224,13 @@ def optimize_vehicle(
                 vehicle_id=vehicle_id,
                 ga_result=ga_result,
                 old_assigned_route=old_assigned_route,
+                new_assigned_route=new_assigned_route,
             )
 
         return build_success_response(
             vehicle_id=vehicle_id,
             old_assigned_route=old_assigned_route,
+            new_assigned_route=new_assigned_route,
             ga_result=ga_result,
             mongo_updated=mongo_updated,
         )
@@ -300,15 +309,18 @@ def optimize_vehicle_by_id(
 
 
 class FakeMongoUpdateResult:
-    def __init__(self, matched_count: int = 1, modified_count: int = 1):
+    def __init__(
+        self,
+        matched_count: int = 1,
+        modified_count: int = 1,
+        upserted_id: Optional[str] = None,
+    ):
         self.matched_count = matched_count
         self.modified_count = modified_count
+        self.upserted_id = upserted_id
 
 
 class FakeMongoCollection:
-    """
-    Fake MongoDB collection de test local khong can chay MongoDB.
-    """
     def __init__(self):
         self.docs = {}
 
@@ -319,11 +331,26 @@ class FakeMongoCollection:
         vehicle_id = query.get("vehicle_id")
         return self.docs.get(vehicle_id)
 
-    def update_one(self, query: Dict[str, Any], update_doc: Dict[str, Any]) -> FakeMongoUpdateResult:
+    def update_one(
+        self,
+        query: Dict[str, Any],
+        update_doc: Dict[str, Any],
+        upsert: bool = False,
+    ) -> FakeMongoUpdateResult:
         vehicle_id = query.get("vehicle_id")
 
         if vehicle_id not in self.docs:
-            return FakeMongoUpdateResult(matched_count=0, modified_count=0)
+            if not upsert:
+                return FakeMongoUpdateResult(matched_count=0, modified_count=0)
+
+            self.docs[vehicle_id] = {"vehicle_id": vehicle_id}
+            set_doc = update_doc.get("$set", {})
+            self.docs[vehicle_id].update(set_doc)
+            return FakeMongoUpdateResult(
+                matched_count=0,
+                modified_count=0,
+                upserted_id=vehicle_id,
+            )
 
         set_doc = update_doc.get("$set", {})
         self.docs[vehicle_id].update(set_doc)
