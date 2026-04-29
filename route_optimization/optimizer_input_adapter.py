@@ -1,47 +1,21 @@
 """
 optimizer_input_adapter.py
 
-Lop chuan hoa input cho module Route Optimization.
+Input normalization for the Route Optimization module.
 
-Muc tieu:
-- Khong de Genetic Algorithm doc truc tiep MongoDB / Redis.
-- Gom du lieu tu MongoDB vehicle_doc va Redis traffic state ve mot object thong nhat.
-- Giup module GA de test offline bang du lieu fake.
+This version supports both naming styles:
+- entity_id / entity_type from data ingestion and Kafka GPS messages
+- vehicle_id from optimization, MongoDB and dashboard schemas
 
-Cach dung co ban:
-
-    from optimizer_input_adapter import build_optimization_input, validate_optimization_input
-
-    opt_input = build_optimization_input(vehicle_doc, redis_client)
-    validate_optimization_input(opt_input)
-
-    # Sau do dua opt_input vao GA:
-    # result = run_genetic_algorithm(opt_input)
-
-Redis schema ky vong:
-- Set blocked_edges:
-    blocked_edges = {"E_001", "E_002", ...}
-
-- Hash edge status:
-    key = "edge:{edge_id}"
-    fields:
-        avg_speed
-        estimated_travel_time
-        vehicle_count
-        distance
-        max_speed
-        is_congested
-        last_updated
+Important mapping:
+    vehicle_id = vehicle_doc["vehicle_id"] if present
+              = vehicle_doc["entity_id"] otherwise
 """
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Set
 import time
 
-
-# =========================
-# Dataclass definitions
-# =========================
 
 @dataclass
 class Customer:
@@ -66,6 +40,8 @@ class EdgeTraffic:
 class OptimizationInput:
     request_id: str
     vehicle_id: str
+    entity_id: str
+    entity_type: str
     current_edge_id: str
     distance_on_edge: float
     assigned_route: List[str]
@@ -75,12 +51,7 @@ class OptimizationInput:
     created_at: int
 
 
-# =========================
-# Small conversion helpers
-# =========================
-
 def _decode(value: Any) -> Any:
-    """Redis may return bytes. Convert bytes to string."""
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return value
@@ -117,35 +88,36 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     value = _decode(value)
     if value is None:
         return default
-
     if isinstance(value, bool):
         return value
-
-    value = str(value).strip().lower()
-    return value in ("1", "true", "yes", "y")
+    return str(value).strip().lower() in ("1", "true", "yes", "y")
 
 
 def _normalize_redis_hash(raw_hash: Dict[Any, Any]) -> Dict[str, Any]:
-    """
-    Convert Redis hash from {b'key': b'value'} to {'key': 'value'}.
-    """
     result = {}
     for key, value in raw_hash.items():
         result[_to_str(key)] = _decode(value)
     return result
 
 
-# =========================
-# MongoDB vehicle parsing
-# =========================
+def get_vehicle_id(vehicle_doc: Dict[str, Any]) -> str:
+    return _to_str(vehicle_doc.get("vehicle_id") or vehicle_doc.get("entity_id"))
+
+
+def get_entity_id(vehicle_doc: Dict[str, Any]) -> str:
+    return _to_str(vehicle_doc.get("entity_id") or vehicle_doc.get("vehicle_id"))
+
+
+def get_entity_type(vehicle_doc: Dict[str, Any]) -> str:
+    return _to_str(vehicle_doc.get("entity_type"), default="Truck")
+
+
+def get_current_edge_id(vehicle_doc: Dict[str, Any]) -> str:
+    return _to_str(vehicle_doc.get("edge_id") or vehicle_doc.get("current_edge_id"))
+
 
 def parse_customers(raw_customers: Any) -> List[Customer]:
-    """
-    Convert MongoDB remaining_customers to List[Customer].
-    Invalid customers are skipped.
-    """
     customers: List[Customer] = []
-
     if not isinstance(raw_customers, list):
         return customers
 
@@ -160,21 +132,12 @@ def parse_customers(raw_customers: Any) -> List[Customer]:
         if not cust_id:
             continue
 
-        customers.append(
-            Customer(
-                cust_id=cust_id,
-                latitude=lat,
-                longitude=lon,
-            )
-        )
+        customers.append(Customer(cust_id=cust_id, latitude=lat, longitude=lon))
 
     return customers
 
 
 def parse_assigned_route(raw_route: Any) -> List[str]:
-    """
-    Convert assigned_route to List[str].
-    """
     if not isinstance(raw_route, list):
         return []
 
@@ -187,16 +150,7 @@ def parse_assigned_route(raw_route: Any) -> List[str]:
     return route
 
 
-# =========================
-# Redis parsing
-# =========================
-
 def get_blocked_edges(redis_client: Any) -> List[str]:
-    """
-    Read blocked edges from Redis set named 'blocked_edges'.
-
-    If Redis is unavailable or key does not exist, return empty list.
-    """
     try:
         raw_edges = redis_client.smembers("blocked_edges")
     except Exception:
@@ -212,9 +166,6 @@ def get_blocked_edges(redis_client: Any) -> List[str]:
 
 
 def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
-    """
-    Read traffic state for one edge from Redis hash: edge:{edge_id}.
-    """
     key = f"edge:{edge_id}"
 
     try:
@@ -240,14 +191,6 @@ def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
 
 
 def build_traffic_snapshot(redis_client: Any, edge_ids: List[str]) -> Dict[str, EdgeTraffic]:
-    """
-    Build traffic snapshot for important edges only.
-
-    Nen lay:
-    - cac edge trong assigned_route
-    - cac edge trong blocked_edges
-    - current_edge_id
-    """
     snapshot: Dict[str, EdgeTraffic] = {}
 
     for edge_id in sorted(set(edge_ids)):
@@ -261,27 +204,15 @@ def build_traffic_snapshot(redis_client: Any, edge_ids: List[str]) -> Dict[str, 
     return snapshot
 
 
-# =========================
-# Main adapter
-# =========================
-
 def build_optimization_input(
     vehicle_doc: Dict[str, Any],
     redis_client: Any,
     request_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Build normalized input for Genetic Algorithm.
-
-    vehicle_doc expected fields:
-        vehicle_id
-        edge_id
-        distance_on_edge
-        assigned_route
-        remaining_customers
-    """
-    vehicle_id = _to_str(vehicle_doc.get("vehicle_id"))
-    current_edge_id = _to_str(vehicle_doc.get("edge_id"))
+    vehicle_id = get_vehicle_id(vehicle_doc)
+    entity_id = get_entity_id(vehicle_doc)
+    entity_type = get_entity_type(vehicle_doc)
+    current_edge_id = get_current_edge_id(vehicle_doc)
 
     assigned_route = parse_assigned_route(vehicle_doc.get("assigned_route", []))
     remaining_customers = parse_customers(vehicle_doc.get("remaining_customers", []))
@@ -294,42 +225,35 @@ def build_optimization_input(
 
     traffic_snapshot = build_traffic_snapshot(redis_client, list(important_edges))
 
-    now_ms = int(time.time() * 1000)
+    now = int(time.time() * 1000)
 
     normalized = OptimizationInput(
-        request_id=request_id or f"OPT_{vehicle_id}_{now_ms}",
+        request_id=request_id or f"OPT_{vehicle_id}_{now}",
         vehicle_id=vehicle_id,
+        entity_id=entity_id,
+        entity_type=entity_type,
         current_edge_id=current_edge_id,
         distance_on_edge=_to_float(vehicle_doc.get("distance_on_edge")),
         assigned_route=assigned_route,
         remaining_customers=remaining_customers,
         blocked_edges=blocked_edges,
         traffic_snapshot=traffic_snapshot,
-        created_at=now_ms,
+        created_at=now,
     )
 
     return optimization_input_to_dict(normalized)
 
 
 def optimization_input_to_dict(data: OptimizationInput) -> Dict[str, Any]:
-    """
-    Convert dataclass object to plain dict.
-    This is easier to pass into existing GA code.
-    """
     return asdict(data)
 
 
-# =========================
-# Validation
-# =========================
-
 def validate_optimization_input(data: Dict[str, Any]) -> None:
-    """
-    Raise ValueError if normalized input is invalid.
-    """
     required_fields = [
         "request_id",
         "vehicle_id",
+        "entity_id",
+        "entity_type",
         "current_edge_id",
         "assigned_route",
         "remaining_customers",
@@ -366,22 +290,10 @@ def validate_optimization_input(data: Dict[str, Any]) -> None:
             raise ValueError("Each customer must have latitude and longitude")
 
 
-# =========================
-# Reroute trigger helper
-# =========================
-
 def should_trigger_reroute(
     normalized_input: Dict[str, Any],
     min_avg_speed: float = 5.0,
 ) -> bool:
-    """
-    Decide whether GA should run.
-
-    Trigger if:
-    - current assigned_route contains blocked edge
-    - any edge in assigned_route has avg_speed <= min_avg_speed
-    - any edge in assigned_route has is_congested = True
-    """
     assigned_route = set(normalized_input.get("assigned_route", []))
     blocked_edges = set(normalized_input.get("blocked_edges", []))
     traffic_snapshot = normalized_input.get("traffic_snapshot", {})
@@ -406,20 +318,11 @@ def should_trigger_reroute(
     return False
 
 
-# =========================
-# Demo without real Redis
-# =========================
-
 class FakeRedis:
-    """
-    Simple fake Redis for local testing.
-    Remove this class in production if not needed.
-    """
     def __init__(self):
         self.sets = {
             "blocked_edges": {"E_106_TaySon"}
         }
-
         self.hashes = {
             "edge:E_105_NgTrai": {
                 "avg_speed": "25.0",
@@ -449,9 +352,9 @@ class FakeRedis:
 
 
 if __name__ == "__main__":
-    # Local test example
     vehicle_doc = {
-        "vehicle_id": "Truck_001",
+        "entity_id": "Truck_001",
+        "entity_type": "Truck",
         "edge_id": "E_105_NgTrai",
         "distance_on_edge": 150.5,
         "assigned_route": ["E_105_NgTrai", "E_106_TaySon"],
@@ -470,7 +373,6 @@ if __name__ == "__main__":
     }
 
     redis_client = FakeRedis()
-
     opt_input = build_optimization_input(vehicle_doc, redis_client)
     validate_optimization_input(opt_input)
 
