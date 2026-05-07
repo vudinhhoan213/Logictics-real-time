@@ -16,8 +16,9 @@ const io = new Server(server, {
 // --- CẤU HÌNH KẾT NỐI ---
 // Khi chạy trong Docker, ta dùng tên service 'mongodb' và 'redis'
 const MONGO_URI =
-  process.env.MONGO_URI ||
-  "mongodb://127.0.0.1:27017/traffic_system?directConnection=true";
+  process.env.MONGO_URI 
+    ? `${process.env.MONGO_URI}traffic_system?replicaSet=rs0` 
+    : "mongodb://127.0.0.1:27017/traffic_system?directConnection=true";
 const REDIS_URL = process.env.REDIS_HOST
   ? `redis://${process.env.REDIS_HOST}:6379`
   : "redis://127.0.0.1:6379";

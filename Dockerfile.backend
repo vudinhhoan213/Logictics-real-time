@@ -2,10 +2,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
+COPY dashboard/bridge-server/package*.json ./
 RUN npm install
 
-COPY . .
+COPY dashboard/bridge-server/ .
 
 # Expose port của Vite (thường là 4000)
 EXPOSE 4000

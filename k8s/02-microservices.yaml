@@ -1,0 +1,160 @@
+# ================= DATA INGESTION (BOT) =================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bot-simulator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bot-simulator
+  template:
+    metadata:
+      labels:
+        app: bot-simulator
+    spec:
+      containers:
+      - name: bot-simulator
+        image: logictics-bot:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: KAFKA_BROKER
+          value: "kafka:9092"
+
+# ================= STREAM PROCESSING =================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stream-processing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stream-processing
+  template:
+    metadata:
+      labels:
+        app: stream-processing
+    spec:
+      containers:
+      - name: stream-processing
+        image: logictics-stream:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: KAFKA_BROKER
+          value: "kafka:9092"
+        - name: REDIS_HOST
+          value: "redis"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: EDGES_JSON
+          value: "/app/data/edges_schema.json"
+
+# ================= ROUTE OPTIMIZATION (GA) =================
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: route-optimization
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: route-optimization
+  template:
+    metadata:
+      labels:
+        app: route-optimization
+    spec:
+      containers:
+      - name: route-optimization
+        image: logictics-opt:latest  # Đã đổi đúng tên bạn yêu cầu
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: KAFKA_BROKER
+          value: "kafka:9092"
+        - name: REDIS_HOST
+          value: "redis"
+        - name: MONGO_URI
+          value: "mongodb://mongodb:27017/"
+
+# ================= DASHBOARD BACKEND =================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-backend
+spec:
+  type: NodePort # Mở cổng để trình duyệt ở ngoài máy tính có thể chọc vào
+  selector:
+    app: dashboard-backend
+  ports:
+    - port: 4000
+      targetPort: 4000
+      nodePort: 30000 
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-backend
+  template:
+    metadata:
+      labels:
+        app: dashboard-backend
+    spec:
+      containers:
+      - name: dashboard-backend
+        image: logictics-backend:v3
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: REDIS_HOST
+          value: "redis"
+        - name: MONGO_URI
+          value: "mongodb://mongodb:27017/"
+        - name: PORT
+          value: "4000"
+
+# ================= DASHBOARD FRONTEND =================
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard-frontend
+spec:
+  type: NodePort
+  selector:
+    app: dashboard-frontend
+  ports:
+    - port: 5173
+      targetPort: 5173
+      nodePort: 30001
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard-frontend
+  template:
+    metadata:
+      labels:
+        app: dashboard-frontend
+    spec:
+      containers:
+      - name: dashboard-frontend
+        image: logictics-frontend:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: VITE_API_URL
+          value: "http://localhost:30000" # Trỏ vào NodePort của Backend

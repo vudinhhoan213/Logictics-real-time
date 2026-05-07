@@ -1,6 +1,7 @@
 from optimizer import RouteOptimizer
 from graph_network import GraphNetwork
 from traffic_adapter import TrafficAdapter
+import time
 
 
 def run_case(title, graph, vehicle_state, customers, blocked_edges):
@@ -60,4 +61,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    print("Khởi động hệ thống Tối ưu hóa (Chế độ chạy liên tục trên K8s)...")
+    
+    while True:
+        try:
+            # Gọi hàm main
+            main()
+            
+            print("Đã hoàn thành 1 vòng tối ưu, tạm nghỉ 5 giây...")
+            time.sleep(5) # Nghỉ 5 giây để tránh bị cháy CPU
+            
+        except Exception as e:
+            print(f"Có lỗi xảy ra trong vòng lặp: {e}")
+            time.sleep(5) # Nếu lỗi cũng nghỉ 5 giây rồi mới thử lại
