@@ -19,7 +19,7 @@ spec:
         imagePullPolicy: IfNotPresent
         env:
         - name: KAFKA_BROKER
-          value: "kafka:9092"
+          value: "kafka.default.svc.cluster.local:9092"
 
 # ================= STREAM PROCESSING =================
 ---
@@ -39,13 +39,13 @@ spec:
     spec:
       containers:
       - name: stream-processing
-        image: logictics-stream:latest
+        image: logictics-stream:v3
         imagePullPolicy: IfNotPresent
         env:
         - name: KAFKA_BROKER
-          value: "kafka:9092"
+          value: "kafka.default.svc.cluster.local:9092"
         - name: REDIS_HOST
-          value: "redis"
+          value: "redis.default.svc.cluster.local"
         - name: REDIS_PORT
           value: "6379"
         - name: EDGES_JSON
@@ -69,17 +69,17 @@ spec:
     spec:
       containers:
       - name: route-optimization
-        image: logictics-opt:latest  # Đã đổi đúng tên bạn yêu cầu
+        image: logictics-opt:v4  
         imagePullPolicy: IfNotPresent
         env:
         - name: PYTHONUNBUFFERED
           value: "1"
         - name: KAFKA_BROKER
-          value: "kafka:9092"
+          value: "kafka.default.svc.cluster.local:9092"
         - name: REDIS_HOST
-          value: "redis"
+          value: "redis.default.svc.cluster.local"
         - name: MONGO_URI
-          value: "mongodb://mongodb:27017/"
+          value: "mongodb://mongodb.default.svc.cluster.local:27017/?directConnection=true"
 
 # ================= DASHBOARD BACKEND =================
 ---
@@ -112,11 +112,11 @@ spec:
     spec:
       containers:
       - name: dashboard-backend
-        image: logictics-backend:v3
+        image: logictics-backend:v4
         imagePullPolicy: IfNotPresent
         env:
         - name: REDIS_HOST
-          value: "redis"
+          value: "redis.default.svc.cluster.local"
         - name: MONGO_URI
           value: "mongodb://mongodb:27017/"
         - name: PORT

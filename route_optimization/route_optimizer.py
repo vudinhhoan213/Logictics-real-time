@@ -359,46 +359,52 @@ class FakeMongoCollection:
 
 
 if __name__ == "__main__":
-    from optimizer_input_adapter import FakeRedis
+    import os
+    import time
+    from pymongo import MongoClient
+    import redis
 
-    vehicle_doc = {
-        "vehicle_id": "Truck_001",
-        "edge_id": "E_105_NgTrai",
-        "distance_on_edge": 150.5,
-        "assigned_route": ["E_105_NgTrai", "E_106_TaySon"],
-        "remaining_customers": [
-            {
-                "cust_id": "Cust_001",
-                "latitude": 21.012345,
-                "longitude": 105.812345,
-            },
-            {
-                "cust_id": "Cust_002",
-                "latitude": 21.022345,
-                "longitude": 105.822345,
-            },
-            {
-                "cust_id": "Cust_003",
-                "latitude": 21.032345,
-                "longitude": 105.802345,
-            },
-        ],
-    }
+    print("🚀 Khởi động Route Optimization Worker...")
 
-    redis_client = FakeRedis()
-    mongo_collection = FakeMongoCollection()
-    mongo_collection.insert_one_doc(vehicle_doc)
+    # 1. Kết nối thật vào các hệ thống
+    mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb.default.svc.cluster.local:27017/")
+    redis_host = os.getenv("REDIS_HOST", "redis.default.svc.cluster.local")
+    redis_port = int(os.getenv("REDIS_PORT_NUM", 6379))
 
-    result = optimize_vehicle(
-        vehicle_doc=vehicle_doc,
-        redis_client=redis_client,
-        mongo_collection=mongo_collection,
-        force=False,
-        random_seed=42,
-    )
+    print(f"🔗 Đang kết nối MongoDB: {mongo_uri}")
+    mongo_client = MongoClient(mongo_uri)
+    # LƯU Ý: Đổi 'traffic_system' thành tên Database thật của bạn nếu khác
+    db = mongo_client["traffic_system"] 
+    real_mongo_collection = db["assigned_routes"]
 
-    print("Optimization result:")
-    print(result)
+    print(f"🔗 Đang kết nối Redis: {redis_host}:{redis_port}")
+    real_redis_client = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
 
-    print("\nMongoDB document after update:")
-    print(mongo_collection.find_one({"vehicle_id": "Truck_001"}))
+    print("✅ Đã kết nối thành công! Bắt đầu giám sát giao thông 24/7...")
+
+    # 2. Vòng lặp vĩnh cửu của Kubernetes
+    while True:
+        try:
+            # Lấy danh sách toàn bộ xe tải đang hoạt động từ MongoDB
+            # (Giả sử bạn chỉ muốn tối ưu cho Truck, hoặc lấy toàn bộ nếu collection chỉ chứa xe tải)
+            trucks_cursor = real_mongo_collection.find({}) 
+            vehicle_docs = list(trucks_cursor)
+
+            if vehicle_docs:
+                # Gọi hàm tối ưu xịn sò của bạn
+                result = optimize_many_vehicles(
+                    vehicle_docs=vehicle_docs,
+                    redis_client=real_redis_client,
+                    mongo_collection=real_mongo_collection,
+                    force=False # Chỉ chạy lại thuật toán GA khi đường bị kẹt (theo logic của bạn)
+                )
+                
+                # In log cho đẹp để dễ theo dõi trong Terminal
+                if result["optimized_count"] > 0:
+                    print(f"[CẬP NHẬT] Đã tính toán lại đường đi cho {result['optimized_count']} xe do kẹt xe!")
+            
+        except Exception as e:
+            print(f"❌ Lỗi vòng lặp: {e}")
+
+        # Nghỉ ngơi 5 giây trước khi quét lại để không làm cháy CPU
+        time.sleep(5)

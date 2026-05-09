@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 
@@ -9,4 +9,4 @@ RUN pip install networkx pymongo redis confluent-kafka
 COPY data/ ./data/
 COPY route_optimization/ ./route_optimization/
 
-CMD ["python", "route_optimization/test_optimizer.py"]
+CMD ["python", "route_optimization/route_optimizer.py"]
