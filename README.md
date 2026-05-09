@@ -53,10 +53,10 @@ docker-compose up -d --build
 
 # Sau khi cài Kuberneties vào Docker Desktop. Tạo image
 docker build -t logictics-bot:latest -f Dockerfile.data_ingestion .
-docker build --no-cache -t logictics-backend:v3 -f Dockerfile.backend .
-docker build -t logictics-frontend:latest -f Dockerfile.frontend .
-docker build -t logictics-opt:latest -f Dockerfile.route_optimization .
-docker build -t logictics-stream:latest -f Dockerfile.stream_processing .
+docker build --no-cache -t logictics-backend:v4 -f Dockerfile.backend .
+docker build --no-cache -t logictics-frontend:latest -f Dockerfile.frontend .
+docker build --no-cache -t logictics-opt:v4 -f Dockerfile.route_optimization .
+docker build --no-cache -t logictics-stream:v3 -f Dockerfile.stream_processing .
 
 # Khởi động K8s
 kubectl apply -f k8s/01-infrastructure.yaml
@@ -65,7 +65,16 @@ kubectl apply -f k8s/01-infrastructure.yaml
 kubectl get pods -w
 
 # Kích hoạt MongoDB qua pod - lấy từ mục name khi chạy lệnh trên
-kubectl exec -it mongodb-85d4b65c9d-xg6jj -- mongosh --eval "rs.initiate()"
+kubectl exec -it mongodb-85d4b65c9d-8qk79 -- mongosh --eval "rs.initiate()"
 
 # Làm tương tự với file thứ yaml thứ 2
 kubectl apply -f k8s/02-microservices.yaml
+
+# Port-Forward, Sau đó vào http://localhost:30001/
+kubectl port-forward svc/dashboard-frontend 30001:5173
+
+# Sau đó mở 1 terminal mới và chạy lệnh rồi F5 lại trang
+kubectl port-forward svc/dashboard-backend 4000:4000
+
+# Tạm thời tắt k8s
+kubectl scale deployment --all --replicas=0
