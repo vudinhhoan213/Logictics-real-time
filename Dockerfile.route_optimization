@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY stream_processing/redis_manager.py .
+COPY stream_processing/ ./stream_processing/
 
 RUN pip install networkx pymongo redis confluent-kafka
 

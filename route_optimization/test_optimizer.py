@@ -19,7 +19,7 @@ def run_case(title, graph, vehicle_state, customers, blocked_edges):
 
 def main():
     graph = GraphNetwork()
-    graph.load_from_schema("../data/edges_schema.json")
+    graph.load_from_schema("/app/data/edges_schema.json")
 
     vehicle_state = {
         "vehicle_id": "Truck_001",
