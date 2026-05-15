@@ -252,6 +252,10 @@ def optimize_many_vehicles(
     results = []
 
     for vehicle_doc in vehicle_docs:
+        new_route = vehicle_doc.get("new_assigned_route")
+        needs_bootstrap = not (isinstance(new_route, list) and len(new_route) > 0)
+        effective_force = bool(force or needs_bootstrap)
+
         result = optimize_vehicle(
             vehicle_doc=vehicle_doc,
             redis_client=redis_client,
@@ -260,7 +264,7 @@ def optimize_many_vehicles(
             population_size=population_size,
             generations=generations,
             mutation_rate=mutation_rate,
-            force=force,
+            force=effective_force,
         )
         results.append(result)
 

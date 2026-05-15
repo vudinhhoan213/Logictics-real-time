@@ -28,29 +28,39 @@ mongoose.connect(MONGO_URI).then(() => console.log("✅ Đã kết nối MongoDB
 
 // 3. Kết nối Kafka - Lấy vị trí 100 xe tải [cite: 3, 5, 18]
 const kafka = new Kafka({ clientId: "dashboard-backend", brokers: [KAFKA_BROKER] });
-const consumer = kafka.consumer({ groupId: "dashboard-group" });
 
-const runKafka = async () => {
-  await consumer.connect();
-  await consumer.subscribe({ topic: "gps_stream", fromBeginning: false });
-  await consumer.run({
-    eachMessage: async ({ message }) => {
-      try {
-        const data = JSON.parse(message.value.toString());
-        // Lọc đúng 100 xe tải để hiển thị [cite: 3, 18]
-        if (data.entity_type === "Truck") {
-          io.emit("vehicle_update", {
-            id: data.entity_id,
-            lat: data.latitude,
-            lon: data.longitude,
-            speed: data.speed
-          });
-        }
-      } catch (e) { console.error("Lỗi parse Kafka:", e); }
-    },
-  });
-};
-runKafka().catch(console.error);
+/** Kafka đôi khi chưa mở port khi container backend start trước — retry vô hạn. */
+async function runKafkaForever() {
+  while (true) {
+    const consumer = kafka.consumer({ groupId: "dashboard-group" });
+    try {
+      console.log(`Đang kết nối Kafka (${KAFKA_BROKER})...`);
+      await consumer.connect();
+      await consumer.subscribe({ topic: "gps_stream", fromBeginning: false });
+      console.log("✅ Kafka: đã subscribe topic gps_stream");
+      await consumer.run({
+        eachMessage: async ({ message }) => {
+          try {
+            const data = JSON.parse(message.value.toString());
+            if (data.entity_type === "Truck") {
+              io.emit("vehicle_update", {
+                id: data.entity_id,
+                lat: data.latitude,
+                lon: data.longitude,
+                speed: data.speed
+              });
+            }
+          } catch (e) { console.error("Lỗi parse Kafka:", e); }
+        },
+      });
+    } catch (e) {
+      console.error("Kafka consumer:", e.message || e);
+      try { await consumer.disconnect(); } catch (_) { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+runKafkaForever();
 
 // --- MONGODB CHANGE STREAMS (Lộ trình GA) [cite: 12, 18, 21] ---
 const RouteModel = mongoose.model("Route", new mongoose.Schema({
