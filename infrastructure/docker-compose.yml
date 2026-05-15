@@ -121,8 +121,8 @@ services:
   # Backend Socket.io
   dashboard_backend:
     build:
-      context: ../dashboard/bridge-server
-      dockerfile: ../../Dockerfile.backend
+      context: ../ # dashboard/bridge-server
+      dockerfile: Dockerfile.backend
     container_name: service_dashboard_backend
     depends_on:
       - redis
@@ -131,7 +131,9 @@ services:
       - "4000:4000"
     environment:
       - REDIS_HOST=redis
-      - MONGO_URI=mongodb://mongodb:27017/
+      # Cùng DB `traffic_system` với route_optimization (Change Stream + snapshot)
+      - MONGO_URI=mongodb://mongodb:27017/traffic_system?replicaSet=rs0
+      - KAFKA_BROKER=kafka:29092
       - PORT=4000
 
   # Frontend ReactJS (Dashboard)
