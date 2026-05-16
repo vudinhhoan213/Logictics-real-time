@@ -3,7 +3,8 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const mongoose = require("mongoose");
-const redis = require("redis"); // 1. Thêm thư viện Redis
+const redis = require("redis");
+const { Kafka } = require("kafkajs");
 
 const app = express();
 app.use(cors());
@@ -14,85 +15,116 @@ const io = new Server(server, {
 });
 
 // --- CẤU HÌNH KẾT NỐI ---
-// Khi chạy trong Docker, ta dùng tên service 'mongodb' và 'redis'
-const MONGO_URI =
-  process.env.MONGO_URI 
-    ? `${process.env.MONGO_URI}traffic_system?replicaSet=rs0` 
-    : "mongodb://127.0.0.1:27017/traffic_system?directConnection=true";
-const REDIS_URL = process.env.REDIS_HOST
-  ? `redis://${process.env.REDIS_HOST}:6379`
-  : "redis://127.0.0.1:6379";
+const MONGO_URI = process.env.MONGO_URI || "mongodb://mongodb:27017/traffic_system?replicaSet=rs0";
+const REDIS_URL = process.env.REDIS_HOST ? `redis://${process.env.REDIS_HOST}:6379` : "redis://redis:6379";
+const KAFKA_BROKER = process.env.KAFKA_BROKER || "kafka:29092";
 
-// 2. Kết nối Redis
+// 1. Kết nối Redis [cite: 18, 55]
 const redisClient = redis.createClient({ url: REDIS_URL });
-redisClient.on("error", (err) => console.error("Lỗi Redis:", err));
-(async () => {
-  await redisClient.connect();
-  console.log("Đã kết nối Redis thành công!");
-})();
+redisClient.connect().then(() => console.log("✅ Đã kết nối Redis"));
 
-// Kết nối MongoDB
-mongoose
-  .connect(MONGO_URI)
-  .then(() => console.log("Đã kết nối MongoDB thành công!"))
-  .catch((err) => console.error("Lỗi kết nối MongoDB:", err.message));
+// 2. Kết nối MongoDB [cite: 18, 55]
+mongoose.connect(MONGO_URI).then(() => console.log("✅ Đã kết nối MongoDB"));
 
-// --- MONGODB CHANGE STREAMS (Lộ trình tối ưu) ---
-const RouteSchema = new mongoose.Schema({
+// 3. Kết nối Kafka - Lấy vị trí 100 xe tải [cite: 3, 5, 18]
+const kafka = new Kafka({ clientId: "dashboard-backend", brokers: [KAFKA_BROKER] });
+
+/** Kafka đôi khi chưa mở port khi container backend start trước — retry vô hạn. */
+async function runKafkaForever() {
+  while (true) {
+    const consumer = kafka.consumer({ groupId: "dashboard-group" });
+    try {
+      console.log(`Đang kết nối Kafka (${KAFKA_BROKER})...`);
+      await consumer.connect();
+      await consumer.subscribe({ topic: "gps_stream", fromBeginning: false });
+      console.log("✅ Kafka: đã subscribe topic gps_stream");
+      await consumer.run({
+        eachMessage: async ({ message }) => {
+          try {
+            const data = JSON.parse(message.value.toString());
+            if (data.entity_type === "Truck") {
+              io.emit("vehicle_update", {
+                id: data.entity_id,
+                lat: data.latitude,
+                lon: data.longitude,
+                speed: data.speed
+              });
+            }
+          } catch (e) { console.error("Lỗi parse Kafka:", e); }
+        },
+      });
+    } catch (e) {
+      console.error("Kafka consumer:", e.message || e);
+      try { await consumer.disconnect(); } catch (_) { /* ignore */ }
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+runKafkaForever();
+
+// --- MONGODB CHANGE STREAMS (Lộ trình GA) [cite: 12, 18, 21] ---
+const RouteModel = mongoose.model("Route", new mongoose.Schema({
   vehicle_id: String,
   new_assigned_route: [String],
   estimated_total_travel_time: Number,
+}), "assigned_routes");
+
+RouteModel.watch([], { fullDocument: "updateLookup" }).on("change", (change) => {
+  const updatedData = change.fullDocument;
+  if (updatedData) {
+    io.emit("route_optimized", {
+      vehicle_id: updatedData.vehicle_id,
+      path: updatedData.new_assigned_route,
+      time: updatedData.estimated_total_travel_time,
+    });
+  }
 });
-const RouteModel = mongoose.model("Route", RouteSchema, "assigned_routes");
 
-RouteModel.watch([], { fullDocument: "updateLookup" }).on(
-  "change",
-  (change) => {
-    const updatedData = change.fullDocument;
-    if (updatedData) {
-      io.emit("route_optimized", {
-        path: updatedData.new_assigned_route,
-        time: updatedData.estimated_total_travel_time,
-      });
-    }
-  },
-);
+async function emitRoutesSnapshot(socket) {
+  try {
+    const docs = await RouteModel.find({
+      vehicle_id: { $exists: true, $nin: [null, ""] },
+      "new_assigned_route.0": { $exists: true },
+    })
+      .select("vehicle_id new_assigned_route estimated_total_travel_time")
+      .lean();
+    const payload = docs
+      .filter((d) => d.vehicle_id && Array.isArray(d.new_assigned_route) && d.new_assigned_route.length)
+      .map((d) => ({
+        vehicle_id: d.vehicle_id,
+        path: d.new_assigned_route,
+        time: d.estimated_total_travel_time,
+      }));
+    socket.emit("routes_snapshot", payload);
+  } catch (e) {
+    console.error("routes_snapshot:", e);
+  }
+}
 
-// --- REAL-TIME TRAFFIC (Lấy từ Redis) ---
+// --- REAL-TIME TRAFFIC (Redis Polling) [cite: 18, 20, 57] ---
 io.on("connection", (socket) => {
-  console.log("--- Dashboard connected: " + socket.id + " ---");
+  console.log("📡 Dashboard connected: " + socket.id);
 
-  // Thay vì dùng dữ liệu giả, ta sẽ quét Redis định kỳ
+  emitRoutesSnapshot(socket);
+
   const trafficInterval = setInterval(async () => {
     try {
-      // 1. Sửa pattern thành "edge:*" cho khớp với redis_manager.py
       const keys = await redisClient.keys("edge:*");
-
       for (const key of keys) {
         const rawData = await redisClient.get(key);
-        if (!rawData) continue;
-
-        try {
-          // 2. Vì dữ liệu là JSON string, ta phải parse nó ra
+        if (rawData) {
           const payload = JSON.parse(rawData);
-          const edgeId = key.replace("edge:", ""); // Lấy ID gốc
-
           socket.emit("traffic_update", {
-            edge_id: edgeId,
-            avg_speed: payload.avg_speed || 0, // Lấy trường avg_speed từ JSON
+            edge_id: key.replace("edge:", ""),
+            avg_speed: payload.avg_speed || 0,
           });
-        } catch (e) {
-          console.error("Lỗi parse JSON từ Redis:", e);
         }
       }
-    } catch (err) {
-      console.error("Lỗi lấy Redis:", err);
-    }
+    } catch (err) { console.error("Lỗi lấy Redis:", err); }
   }, 2000);
 
-  socket.on("disconnect", () => {
-    clearInterval(trafficInterval);
-  });
+  socket.on("disconnect", () => clearInterval(trafficInterval));
 });
 
-server.listen(4000, () => console.log(`SERVER RUNNING ON PORT 4000`));
+// Sửa lại dòng lỗi này:
+server.listen(4000, () => console.log(`🚀 SERVER RUNNING ON PORT 4000`));

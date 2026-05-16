@@ -13,8 +13,9 @@
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "mongoose": "^9.4.1",
-    "redis": "^5.11.0",
+    "kafkajs": "^2.2.4",
+    "mongoose": "^9.6.2",
+    "redis": "^5.12.1",
     "socket.io": "^4.8.3"
   }
 }
