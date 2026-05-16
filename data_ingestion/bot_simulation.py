@@ -5,9 +5,10 @@ import os
 from kafka_producer import GPSProducer
 
 # --- BIẾN TOÀN CỤC MÔ PHỎNG VẬT LÝ ---
-RHO_MAX = 130  
+RHO_MAX = 250  
 V_MIN = 2.5    
 edge_vehicle_count = {} 
+STUCK_TIMEOUT = 3  # Số tick bị kẹt tối đa trước khi tìm target mới
 
 # Danh sách các "Đích đến" giờ cao điểm (Khu văn phòng, trung tâm thương mại)
 ATTRACTOR_EDGES = [] 
@@ -29,8 +30,8 @@ def load_map_graph(edges_filepath):
     
     # CHUẨN THỰC TẾ: Chọn ra 5 con đường làm "Trung tâm" (ví dụ: các toà nhà văn phòng lớn)
     global ATTRACTOR_EDGES
-    ATTRACTOR_EDGES = random.sample(edges, min(5, len(edges)))
-    print(f"Đã thiết lập {len(ATTRACTOR_EDGES)} trung tâm thu hút giao thông giờ cao điểm.")
+    ATTRACTOR_EDGES = random.sample(edges, min(15, len(edges)))
+    print(f"Đã thiết lập {len(ATTRACTOR_EDGES)} trung tâm thu hút giao thông giờ cao điểm (phân tán).")
         
     return edges, graph
 
@@ -74,7 +75,7 @@ class Vehicle:
             self.target_edge = self._internal_route_edges[self.current_route_index]
         else:
             # Bot thì chỉ cần 1 đích đến, 70% lao vào điểm nóng
-            if random.random() < 0.70:
+            if random.random() < 0.40:
                 self.target_edge = random.choice(ATTRACTOR_EDGES)
             else:
                 self.target_edge = random.choice(self.all_edges)
@@ -83,6 +84,7 @@ class Vehicle:
         self.longitude = self.current_edge['start_node']['lon']
         self.progress_meters = 0.0
         self.speed = self.current_edge['max_speed_kmh']
+        self.stuck_count = 0  # Đếm số tick bị kẹt liên tiếp
         
         edge_vehicle_count[self.current_edge['edge_id']] += 1
 
@@ -114,6 +116,7 @@ class Vehicle:
                     if self.current_route_index < len(self.customer_route):
                         # Lấy tọa độ khách tiếp theo, KHÔNG gọi _spawn() để giữ nguyên vị trí xe
                         self.target_edge = self._internal_route_edges[self.current_route_index]
+                        self.speed = V_MIN  # Truck đang dừng giao hàng
                         edge_vehicle_count[edge_id] += 1 # Xe vẫn đang đứng ở đây
                         return
                     else:
@@ -149,14 +152,27 @@ class Vehicle:
                 
                 if edge_vehicle_count[best_edge['edge_id']] >= next_capacity:
                     self.progress_meters = length_m
-                    self.speed = 0.0
+                    self.speed = V_MIN  # Xe chờ ở ngã tư, giữ tốc độ tối thiểu (idle)
+                    self.stuck_count += 1
                     edge_vehicle_count[edge_id] += 1 
+                    
+                    # Anti-deadlock: kẹt quá STUCK_TIMEOUT tick → đổi target
+                    if self.stuck_count >= STUCK_TIMEOUT:
+                        self.stuck_count = 0
+                        if self.entity_type == "Bot":
+                            self.target_edge = random.choice(self.all_edges)
+                        else:
+                            # Truck: thử edge tiếp theo trong route
+                            if self.current_route_index + 1 < len(self._internal_route_edges):
+                                self.current_route_index += 1
+                                self.target_edge = self._internal_route_edges[self.current_route_index]
                 else:
                     self.current_edge = best_edge
                     self.progress_meters = 0.0
                     self.latitude = self.current_edge['start_node']['lat']
                     self.longitude = self.current_edge['start_node']['lon']
                     edge_vehicle_count[self.current_edge['edge_id']] += 1
+                    self.stuck_count = 0  # Reset khi di chuyển thành công
             else:
                 self._spawn()
         else:

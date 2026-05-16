@@ -115,7 +115,7 @@ spec:
     spec:
       containers:
         - name: dashboard-backend
-          image: logictics-backend:v4
+          image: logictics-backend:v5
           imagePullPolicy: IfNotPresent
           env:
             - name: REDIS_HOST
@@ -159,8 +159,8 @@ spec:
     spec:
       containers:
         - name: dashboard-frontend
-          image: logictics-frontend:latest
+          image: logictics-frontend:v2
           imagePullPolicy: IfNotPresent
           env:
-            - name: VITE_API_URL
-              value: "http://localhost:30000" # Trỏ vào NodePort của Backend
+            - name: BACKEND_INTERNAL_URL
+              value: "http://dashboard-backend:4000"

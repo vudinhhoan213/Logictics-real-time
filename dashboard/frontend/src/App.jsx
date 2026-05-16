@@ -5,7 +5,9 @@ import "leaflet/dist/leaflet.css";
 import edgesData from "./data/edges_schema.json";
 import { io } from "socket.io-client";
 
-const SOCKET_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+// Trong K8s: Vite dev server proxy /socket.io → backend service
+// Fallback dùng VITE_API_URL hoặc rỗng (dùng proxy của Vite)
+const SOCKET_URL = import.meta.env.VITE_API_URL || "";
 
 const ROUTE_PALETTE = [
   "#e11d48",
@@ -65,7 +67,8 @@ function MapFlyTo({ lat, lon, zoom = 16 }) {
 }
 
 function TruckMarker({ vehicle, routeColor, hasRoute, isSelected, onSelect }) {
-  const spd = Math.round(Number(vehicle.speed) || 0);
+  const rawSpd = Number(vehicle.speed) || 0;
+  const spd = rawSpd > 0 ? Math.max(3, Math.round(rawSpd)) : 0;
   const shortId = String(vehicle.id).replace(/^Truck_/i, "");
   const borderColor = routeColor || "#94a3b8";
 
@@ -137,14 +140,32 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ["websocket", "polling"] });
+    const socket = io(SOCKET_URL, { transports: ["polling", "websocket"] });
 
+    // Legacy: từng event đơn lẻ (tương thích ngược)
     socket.on("traffic_update", (data) => {
       setTrafficData((prev) => ({ ...prev, [data.edge_id]: data.avg_speed }));
     });
 
     socket.on("vehicle_update", (data) => {
       setVehicles((prev) => ({ ...prev, [data.id]: data }));
+    });
+
+    // Batch events (tối ưu mới)
+    socket.on("traffic_batch", (batch) => {
+      setTrafficData((prev) => {
+        const next = { ...prev };
+        for (const item of batch) { next[item.edge_id] = item.avg_speed; }
+        return next;
+      });
+    });
+
+    socket.on("vehicle_batch", (batch) => {
+      setVehicles((prev) => {
+        const next = { ...prev };
+        for (const v of batch) { next[v.id] = v; }
+        return next;
+      });
     });
 
     socket.on("routes_snapshot", (payload) => {
