@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger("StreamProcessor")
 
 # ─── Cấu hình ─────────────────────────────────────────────────────────────────
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BROKER", os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092"))
 KAFKA_TOPIC             = os.getenv("KAFKA_TOPIC", "gps_stream")
 REDIS_HOST              = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT              = int(os.getenv("REDIS_PORT", 6379))
@@ -171,7 +171,7 @@ def main():
     raw_df = (
     spark.readStream
     .format("kafka")
-    .option("kafka.bootstrap.servers", "kafka.default.svc.cluster.local:9092")
+    .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
     .option("subscribe", "gps_stream")
     .option("startingOffsets", "earliest")
     .option("failOnDataLoss", "false")

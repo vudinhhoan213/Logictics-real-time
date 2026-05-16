@@ -1,80 +1,107 @@
-# Logictics-real-time
+# 🚚 Logistics Real-Time Dashboard
 
-### Ở trong folder LOGICTICS-REAL-TIME, tạo venv (môi trường ảo) để cài thư viện
+Hệ thống giám sát và tối ưu hóa logistics theo thời gian thực.  
+**Stack**: Kafka · Spark · Redis · MongoDB · React · Socket.IO · Kubernetes
 
-# Tạo thư viện
+---
 
-python -m venv venv
+## 📁 Cấu trúc
 
-# Kích hoạt môi trường ảo
+```
+Logictics-real-time/
+├── data_ingestion/         # Bot mô phỏng 10k xe → Kafka
+├── stream_processing/      # Spark Streaming: map-matching → Redis
+├── route_optimization/     # GA tối ưu tuyến đường → MongoDB
+├── dashboard/
+│   ├── bridge-server/      # Backend (Socket.IO + Kafka + Redis + Mongo)
+│   └── frontend/           # React + Leaflet (Vite dev server)
+├── infrastructure/         # docker-compose.yml
+├── k8s/                    # Kubernetes YAMLs
+├── data/                   # edges_schema.json, hanoi_map.osm
+└── Dockerfile.*
+```
 
-.\venv\Scripts\activate
+---
 
-# Tải các thư viện
+## ☸️ Chạy với Kubernetes
 
-pip install confluent-kafka
+### 1. Build images
 
-### Tạo các Container của Docker
-
-# Vào đúng thư mục chứa file docker-compose.yml
-
-cd .\infrastructure\
-
-# Tạo và chạy các Container
-
-docker-compose up -d
-
-# tắt các Container
-
-docker-compose down
-
-### Chạy thử sinh 10.000 bot
-
-# Chạy file bot_simulation.py
-
-python data_ingestion/bot_simulation.py
-
-# Mở Terminal mới và chạy để đưa ra 10 mess từ Kafka
-
-cd .\infrastructure\
-docker-compose exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic gps_stream --max-messages 10
-
-### Lệnh chạy tất cả qua Docker
-
-# Vào đúng thư mục chứa file docker-compose.yml
-
-cd .\infrastructure\cd
-
-# Tạo và chạy các Container
-
-docker-compose up -d --build
-
-#### Cách chạy với Kuberneties
-
-# Sau khi cài Kuberneties vào Docker Desktop. Tạo image
+```bash
 docker build -t logictics-bot:latest -f Dockerfile.data_ingestion .
-docker build --no-cache -t logictics-backend:v4 -f Dockerfile.backend .
-docker build --no-cache -t logictics-frontend:latest -f Dockerfile.frontend .
-docker build --no-cache -t logictics-opt:v4 -f Dockerfile.route_optimization .
-docker build --no-cache -t logictics-stream:v3 -f Dockerfile.stream_processing .
+docker build --no-cache -t logictics-backend:v5 -f Dockerfile.backend .
+docker build -t logictics-frontend:v2 -f Dockerfile.frontend .
+docker build -t logictics-opt:v4 -f Dockerfile.route_optimization .
+docker build -t logictics-stream:v4 -f Dockerfile.stream_processing .
+```
 
-# Khởi động K8s
+### 2. Deploy infrastructure
+
+```bash
 kubectl apply -f k8s/01-infrastructure.yaml
+kubectl get pods -w   # Đợi tất cả Running
+```
 
-# Lệnh kiểm tra K8s, nếu cả zookeeper, kafka, redis, mongodb đang running thì sang bước tiếp theo
-kubectl get pods -w
+### 3. Khởi tạo MongoDB Replica Set
 
-# Kích hoạt MongoDB qua pod - lấy từ mục name khi chạy lệnh trên
-kubectl exec -it mongodb-85d4b65c9d-8qk79 -- mongosh --eval "rs.initiate()"
+```bash
+kubectl exec -it <mongo-pod> -- mongosh --eval "rs.initiate({_id:'rs0', members:[{_id:0, host:'mongodb:27017'}]})"
+```
 
-# Làm tương tự với file thứ yaml thứ 2
+> ⚠️ **Bắt buộc** phải chỉ định `host:'mongodb:27017'` (tên Service). Nếu không, backend sẽ lỗi `ENOTFOUND` do MongoDB đăng ký pod name.
+
+**Nếu đã initiate rồi** (lỗi "already initialized"):
+
+```bash
+kubectl exec -it <mongo-pod> -- mongosh --eval "var cfg = rs.conf(); cfg.members[0].host = 'mongodb:27017'; rs.reconfig(cfg, {force: true});"
+```
+
+### 4. Deploy microservices
+
+```bash
 kubectl apply -f k8s/02-microservices.yaml
+```
 
-# Port-Forward, Sau đó vào http://localhost:30001/
-kubectl port-forward svc/dashboard-frontend 30001:5173
+### 5. Truy cập Dashboard
 
-# Sau đó mở 1 terminal mới và chạy lệnh rồi F5 lại trang
-kubectl port-forward svc/dashboard-backend 4000:4000
+```bash
+kubectl port-forward svc/dashboard-frontend 3000:5173
+```
 
-# Tạm thời tắt k8s
-kubectl scale deployment --all --replicas=0
+Mở: **http://localhost:3000/**
+
+---
+
+## 🐳 Chạy với Docker Compose
+
+```bash
+cd infrastructure
+docker-compose up -d --build
+```
+
+Truy cập: **http://localhost:5173/**
+
+Tắt: `docker-compose down`
+
+---
+
+## 🛑 Quản lý K8s
+
+```bash
+kubectl scale deployment --all --replicas=0   # Tạm tắt
+kubectl scale deployment --all --replicas=1   # Bật lại
+kubectl delete -f k8s/02-microservices.yaml   # Xoá services
+kubectl delete -f k8s/01-infrastructure.yaml  # Xoá infra
+```
+
+---
+
+## 📌 Ports
+
+| Service | Port |
+|---------|------|
+| Frontend | 3000 (K8s) / 5173 (Compose) |
+| Backend API | 4000 |
+| Kafka | 9092 |
+| MongoDB | 27017 |
+| Redis | 6379 |
