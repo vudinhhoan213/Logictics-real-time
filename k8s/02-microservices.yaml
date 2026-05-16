@@ -121,7 +121,9 @@ spec:
             - name: REDIS_HOST
               value: "redis.default.svc.cluster.local"
             - name: MONGO_URI
-              value: "mongodb://mongodb:27017/"
+              value: "mongodb://mongodb.default.svc.cluster.local:27017/traffic_system?replicaSet=rs0"
+            - name: KAFKA_BROKER
+              value: "kafka.default.svc.cluster.local:9092"
             - name: PORT
               value: "4000"
 

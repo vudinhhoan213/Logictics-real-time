@@ -171,7 +171,10 @@ def main():
     raw_df = (
     spark.readStream
     .format("kafka")
-    .option("kafka.bootstrap.servers", "kafka.default.svc.cluster.local:9092")
+  # Thay đổi từ:
+  # .option("kafka.bootstrap.servers", "kafka.default.svc.cluster.local:9092")
+  # Thành:
+    .option("kafka.bootstrap.servers", "kafka:29092")
     .option("subscribe", "gps_stream")
     .option("startingOffsets", "earliest")
     .option("failOnDataLoss", "false")
