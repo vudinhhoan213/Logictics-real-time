@@ -14,12 +14,13 @@ spec:
         app: bot-simulator
     spec:
       containers:
-      - name: bot-simulator
-        image: logictics-bot:latest
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: KAFKA_BROKER
-          value: "kafka.default.svc.cluster.local:9092"
+        - name: bot-simulator
+          image: logictics-bot:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BROKER
+              value: "kafka.default.svc.cluster.local:9092"
+
 
 # ================= STREAM PROCESSING =================
 ---
@@ -38,18 +39,19 @@ spec:
         app: stream-processing
     spec:
       containers:
-      - name: stream-processing
-        image: logictics-stream:v3
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: KAFKA_BROKER
-          value: "kafka.default.svc.cluster.local:9092"
-        - name: REDIS_HOST
-          value: "redis.default.svc.cluster.local"
-        - name: REDIS_PORT
-          value: "6379"
-        - name: EDGES_JSON
-          value: "/app/data/edges_schema.json"
+        - name: stream-processing
+          image: logictics-stream:v4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: KAFKA_BROKER
+              value: "kafka.default.svc.cluster.local:9092"
+            - name: REDIS_HOST
+              value: "redis.default.svc.cluster.local"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: EDGES_JSON
+              value: "/app/data/edges_schema.json"
+
 
 # ================= ROUTE OPTIMIZATION (GA) =================
 ---
@@ -68,18 +70,19 @@ spec:
         app: route-optimization
     spec:
       containers:
-      - name: route-optimization
-        image: logictics-opt:v4  
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: PYTHONUNBUFFERED
-          value: "1"
-        - name: KAFKA_BROKER
-          value: "kafka.default.svc.cluster.local:9092"
-        - name: REDIS_HOST
-          value: "redis.default.svc.cluster.local"
-        - name: MONGO_URI
-          value: "mongodb://mongodb.default.svc.cluster.local:27017/?directConnection=true"
+        - name: route-optimization
+          image: logictics-opt:v4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: KAFKA_BROKER
+              value: "kafka.default.svc.cluster.local:9092"
+            - name: REDIS_HOST
+              value: "redis.default.svc.cluster.local"
+            - name: MONGO_URI
+              value: "mongodb://mongodb.default.svc.cluster.local:27017/?directConnection=true"
+
 
 # ================= DASHBOARD BACKEND =================
 ---
@@ -94,7 +97,7 @@ spec:
   ports:
     - port: 4000
       targetPort: 4000
-      nodePort: 30000 
+      nodePort: 30000
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -111,16 +114,17 @@ spec:
         app: dashboard-backend
     spec:
       containers:
-      - name: dashboard-backend
-        image: logictics-backend:v4
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: REDIS_HOST
-          value: "redis.default.svc.cluster.local"
-        - name: MONGO_URI
-          value: "mongodb://mongodb:27017/"
-        - name: PORT
-          value: "4000"
+        - name: dashboard-backend
+          image: logictics-backend:v4
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REDIS_HOST
+              value: "redis.default.svc.cluster.local"
+            - name: MONGO_URI
+              value: "mongodb://mongodb:27017/"
+            - name: PORT
+              value: "4000"
+
 
 # ================= DASHBOARD FRONTEND =================
 ---
@@ -152,9 +156,9 @@ spec:
         app: dashboard-frontend
     spec:
       containers:
-      - name: dashboard-frontend
-        image: logictics-frontend:latest
-        imagePullPolicy: IfNotPresent
-        env:
-        - name: VITE_API_URL
-          value: "http://localhost:30000" # Trỏ vào NodePort của Backend
+        - name: dashboard-frontend
+          image: logictics-frontend:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: VITE_API_URL
+              value: "http://localhost:30000" # Trỏ vào NodePort của Backend
