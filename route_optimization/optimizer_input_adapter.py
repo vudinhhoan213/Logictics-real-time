@@ -10,10 +10,15 @@ This version supports both naming styles:
 Important mapping:
     vehicle_id = vehicle_doc["vehicle_id"] if present
               = vehicle_doc["entity_id"] otherwise
+
+Ban fix nay doc duoc ca 2 schema Redis:
+- String JSON: GET edge:<edge_id>
+- Redis hash: HGETALL edge:<edge_id>
 """
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Set
+import json
 import time
 
 
@@ -165,18 +170,52 @@ def get_blocked_edges(redis_client: Any) -> List[str]:
     return sorted(set(blocked_edges))
 
 
-def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
-    key = f"edge:{edge_id}"
-
+def _read_edge_json(redis_client: Any, key: str) -> Optional[Dict[str, Any]]:
+    """
+    Redis writer hien tai co the ghi edge:<id> bang SET JSON.
+    Neu key that ra la hash, redis.get se co the throw WRONGTYPE -> return None.
+    """
     try:
-        raw = redis_client.hgetall(key)
+        raw = redis_client.get(key)
     except Exception:
         return None
 
     if not raw:
         return None
 
-    data = _normalize_redis_hash(raw)
+    try:
+        raw = _decode(raw)
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _read_edge_hash(redis_client: Any, key: str) -> Optional[Dict[str, Any]]:
+    """
+    Backward compatible voi schema cu dung HGETALL edge:<id>.
+    """
+    try:
+        raw_hash = redis_client.hgetall(key)
+    except Exception:
+        return None
+
+    if not raw_hash:
+        return None
+
+    return _normalize_redis_hash(raw_hash)
+
+
+def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
+    key = f"edge:{edge_id}"
+
+    data = _read_edge_json(redis_client, key)
+    if data is None:
+        data = _read_edge_hash(redis_client, key)
+
+    if data is None:
+        return None
 
     return EdgeTraffic(
         edge_id=edge_id,
@@ -184,7 +223,7 @@ def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
         estimated_travel_time=_to_float(data.get("estimated_travel_time")),
         vehicle_count=_to_int(data.get("vehicle_count")),
         distance=_to_float(data.get("distance")),
-        max_speed=_to_float(data.get("max_speed")),
+        max_speed=_to_float(data.get("max_speed") or data.get("max_speed_kmh")),
         is_congested=_to_bool(data.get("is_congested")),
         last_updated=_to_int(data.get("last_updated"), default=0),
     )
@@ -343,9 +382,23 @@ class FakeRedis:
                 "last_updated": "1711864800000",
             },
         }
+        self.strings = {
+            "edge:E_JSON_DEMO": json.dumps({
+                "avg_speed": 12.0,
+                "estimated_travel_time": 42.0,
+                "vehicle_count": 9,
+                "distance": 120.0,
+                "max_speed_kmh": 40.0,
+                "is_congested": False,
+                "last_updated": 1711864800000,
+            })
+        }
 
     def smembers(self, key: str):
         return self.sets.get(key, set())
+
+    def get(self, key: str):
+        return self.strings.get(key)
 
     def hgetall(self, key: str):
         return self.hashes.get(key, {})

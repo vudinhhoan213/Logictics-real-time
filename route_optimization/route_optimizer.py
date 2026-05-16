@@ -3,25 +3,27 @@ route_optimizer.py
 
 Integration layer cho module Route Optimization.
 
-Backend dashboard hien dang nghe MongoDB collection `assigned_routes`
+Backend dashboard nghe MongoDB collection `assigned_routes`
 va emit event `route_optimized` voi format:
     {
+        vehicle_id: updatedData.vehicle_id,
         path: updatedData.new_assigned_route,
         time: updatedData.estimated_total_travel_time
     }
 
-Vi vay file nay ghi cac field:
+File nay ghi cac field:
 - vehicle_id
 - new_assigned_route
 - estimated_total_travel_time
 
-Ghi chu:
-- GA hien tai moi toi uu thu tu khach hang (`optimized_customer_order`).
-- GA chua sinh edge route moi that su tu graph.
-- Tam thoi `new_assigned_route` dung `old_assigned_route` de dashboard co path edge_id hop le.
+Ban fix nay:
+- GA toi uu thu tu khach hang (`optimized_customer_order`).
+- Convert thu tu khach hang -> route edge_id bang graph + shortest path.
+- Chi fallback ve old_assigned_route neu graph khong sinh duoc route hop le.
 """
 
 from typing import Any, Dict, Optional
+import os
 import time
 import traceback
 
@@ -32,12 +34,56 @@ from optimizer_input_adapter import (
 )
 
 from genetic_algorithm import run_genetic_algorithm
+from graph_network import GraphNetwork
+from route_builder import build_route
 
 
 DEFAULT_MIN_AVG_SPEED = 5.0
 DEFAULT_POPULATION_SIZE = 30
 DEFAULT_GENERATIONS = 60
 DEFAULT_MUTATION_RATE = 0.15
+
+_ROUTE_GRAPH = None
+
+
+class _TrafficSnapshotAdapter:
+    """
+    Adapter nho de GraphNetwork.edge_cost() doc duoc traffic_snapshot
+    tu Redis snapshot da normalize trong optimizer_input_adapter.
+    """
+
+    def __init__(self, traffic_snapshot: Dict[str, Any]):
+        self.traffic_snapshot = traffic_snapshot or {}
+
+    def get_edge_state(self, edge_id: str) -> Optional[Dict[str, Any]]:
+        state = self.traffic_snapshot.get(edge_id)
+        if state is None:
+            return None
+
+        if isinstance(state, dict):
+            return state
+
+        # Safety fallback neu sau nay ai do truyen dataclass/object.
+        if hasattr(state, "__dict__"):
+            return dict(state.__dict__)
+
+        return None
+
+
+def get_route_graph() -> GraphNetwork:
+    """
+    Load graph 1 lan trong worker. Trong container K8s, file data nam o:
+        /app/data/edges_schema.json
+    """
+    global _ROUTE_GRAPH
+
+    if _ROUTE_GRAPH is None:
+        schema_path = os.getenv("EDGES_JSON", "/app/data/edges_schema.json")
+        graph = GraphNetwork()
+        graph.load_from_schema(schema_path)
+        _ROUTE_GRAPH = graph
+
+    return _ROUTE_GRAPH
 
 
 def now_ms() -> int:
@@ -89,30 +135,135 @@ def build_success_response(
     }
 
 
+def _customer_order_from_ga(
+    ga_result: Dict[str, Any],
+    opt_input: Dict[str, Any],
+) -> list:
+    optimized_customers = ga_result.get("optimized_customers") or []
+    optimized_customer_order = ga_result.get("optimized_customer_order") or []
+
+    if optimized_customer_order and optimized_customers:
+        customer_by_id = {
+            str(customer.get("cust_id")): customer
+            for customer in optimized_customers
+            if isinstance(customer, dict)
+        }
+
+        ordered_customers = [
+            customer_by_id[cust_id]
+            for cust_id in optimized_customer_order
+            if cust_id in customer_by_id
+        ]
+
+        if ordered_customers:
+            return ordered_customers
+
+    return optimized_customers or opt_input.get("remaining_customers", [])
+
+
 def build_new_assigned_route(
     old_assigned_route: list,
     ga_result: Dict[str, Any],
     opt_input: Dict[str, Any],
 ) -> list:
     """
-    Tao route edge_id moi cho dashboard.
+    Sinh edge route that tu thu tu customer do GA toi uu.
 
-    Hien tai:
-    - GA chi tra ve optimized_customer_order.
-    - Chua co module convert customer order -> shortest path edge list.
-    - Do do tam thoi tra ve old_assigned_route de dashboard nhan duoc
-      new_assigned_route hop le va ve duoc Polyline.
-
-    Sau nay nang cap:
-    - Load graph edges_schema.json.
-    - Map customer toa do -> nearest edge/node.
-    - Dung NetworkX shortest_path voi cost tu Redis.
-    - Tra ve list edge_id moi.
+    Flow:
+    - Lay current_edge_id lam diem xuat phat.
+    - Lay optimized_customers theo thu tu GA.
+    - Map tung customer ve nearest graph node.
+    - Dung shortest_path de noi cac diem giao.
+    - Tra ve list edge_id moi cho dashboard.
     """
-    if old_assigned_route:
-        return old_assigned_route
+    start_edge = (
+        opt_input.get("current_edge_id")
+        or (old_assigned_route[0] if old_assigned_route else "")
+    )
 
-    return []
+    if not start_edge:
+        return old_assigned_route or []
+
+    customer_order = _customer_order_from_ga(ga_result, opt_input)
+    if not customer_order:
+        return old_assigned_route or []
+
+    graph = get_route_graph()
+    graph.set_traffic_adapter(
+        _TrafficSnapshotAdapter(opt_input.get("traffic_snapshot", {}))
+    )
+
+    blocked_edges = opt_input.get("blocked_edges", [])
+
+    route_after_current_edge = build_route(
+        graph=graph,
+        start_edge=start_edge,
+        customer_order=customer_order,
+        blocked_edges=blocked_edges,
+    )
+
+    if not route_after_current_edge:
+        return old_assigned_route or []
+
+    return [start_edge] + route_after_current_edge
+
+
+def _static_edge_cost_seconds(graph: GraphNetwork, edge_id: str) -> Optional[float]:
+    edge = graph.edges.get(edge_id)
+    if not edge:
+        return None
+
+    length_m = float(edge.get("length_meters", 0.0))
+    speed_kmh = max(float(edge.get("max_speed_kmh", 40.0)), 1.0)
+    speed_mps = speed_kmh * 1000.0 / 3600.0
+
+    if length_m <= 0 or speed_mps <= 0:
+        return None
+
+    return length_m / speed_mps
+
+
+def estimate_route_travel_time_seconds(
+    route_edges: list,
+    opt_input: Dict[str, Any],
+) -> Optional[float]:
+    """
+    Dashboard dang hien ETA bang `time / 60`, nen gia tri luu Mongo nen la giay.
+
+    GraphNetwork.edge_cost():
+    - Uu tien estimated_travel_time tu traffic snapshot neu co.
+    - Neu edge bi congested/blocked va cost = inf, fallback static cost de ETA
+      khong bi vo trong UI.
+    """
+    if not route_edges:
+        return None
+
+    graph = get_route_graph()
+    graph.set_traffic_adapter(
+        _TrafficSnapshotAdapter(opt_input.get("traffic_snapshot", {}))
+    )
+
+    total = 0.0
+    blocked_edges = opt_input.get("blocked_edges", [])
+
+    for edge_id in route_edges:
+        cost = graph.edge_cost(edge_id, blocked_edges=blocked_edges)
+
+        if cost == float("inf") or cost is None:
+            static_cost = _static_edge_cost_seconds(graph, edge_id)
+            if static_cost is None:
+                continue
+            cost = static_cost
+
+        try:
+            cost = float(cost)
+        except (TypeError, ValueError):
+            continue
+
+        if cost > 0:
+            total += cost
+
+    return total if total > 0 else None
 
 
 def save_optimization_result_to_mongo(
@@ -126,7 +277,7 @@ def save_optimization_result_to_mongo(
     Cap nhat ket qua optimization vao MongoDB theo schema dashboard.
 
     Collection ky vong:
-        assigned_routes
+        traffic_system.assigned_routes
 
     Fields quan trong cho backend/frontend:
         vehicle_id
@@ -146,10 +297,11 @@ def save_optimization_result_to_mongo(
                 "new_assigned_route": new_assigned_route,
                 "optimized_customer_order": ga_result.get("optimized_customer_order", []),
                 "estimated_total_cost": ga_result.get("estimated_total_cost"),
+                "estimated_total_cost_source": ga_result.get("estimated_total_cost_source"),
                 "generation_count": ga_result.get("generation_count"),
                 "optimized_at": now_ms(),
-                "algorithm": "Genetic Algorithm",
-                "note": "new_assigned_route currently falls back to old_assigned_route until graph pathfinding is implemented",
+                "algorithm": "Genetic Algorithm + Graph shortest path",
+                "note": "new_assigned_route is generated from GA customer order using graph shortest path",
             },
             "last_optimized_at": now_ms(),
             "route_status": "optimized",
@@ -180,7 +332,7 @@ def optimize_vehicle(
     force: bool = False,
     random_seed: Optional[int] = None,
 ) -> Dict[str, Any]:
-    vehicle_id = str(vehicle_doc.get("vehicle_id", ""))
+    vehicle_id = str(vehicle_doc.get("vehicle_id") or vehicle_doc.get("entity_id") or "")
 
     try:
         opt_input = build_optimization_input(
@@ -217,6 +369,18 @@ def optimize_vehicle(
             opt_input=opt_input,
         )
 
+        route_travel_time_seconds = estimate_route_travel_time_seconds(
+            route_edges=new_assigned_route,
+            opt_input=opt_input,
+        )
+
+        if route_travel_time_seconds is not None:
+            ga_result = {
+                **ga_result,
+                "estimated_total_cost": route_travel_time_seconds,
+                "estimated_total_cost_source": "graph_edge_cost_seconds",
+            }
+
         mongo_updated = False
         if mongo_collection is not None:
             mongo_updated = save_optimization_result_to_mongo(
@@ -252,6 +416,10 @@ def optimize_many_vehicles(
     results = []
 
     for vehicle_doc in vehicle_docs:
+        new_route = vehicle_doc.get("new_assigned_route")
+        needs_bootstrap = not (isinstance(new_route, list) and len(new_route) > 0)
+        effective_force = bool(force or needs_bootstrap)
+
         result = optimize_vehicle(
             vehicle_doc=vehicle_doc,
             redis_client=redis_client,
@@ -260,7 +428,7 @@ def optimize_many_vehicles(
             population_size=population_size,
             generations=generations,
             mutation_rate=mutation_rate,
-            force=force,
+            force=effective_force,
         )
         results.append(result)
 
@@ -359,8 +527,6 @@ class FakeMongoCollection:
 
 
 if __name__ == "__main__":
-    import os
-    import time
     from pymongo import MongoClient
     import redis
 
@@ -369,12 +535,11 @@ if __name__ == "__main__":
     # 1. Kết nối thật vào các hệ thống
     mongo_uri = os.getenv("MONGO_URI", "mongodb://mongodb.default.svc.cluster.local:27017/")
     redis_host = os.getenv("REDIS_HOST", "redis.default.svc.cluster.local")
-    redis_port = int(os.getenv("REDIS_PORT_NUM", 6379))
+    redis_port = int(os.getenv("REDIS_PORT_NUM", os.getenv("REDIS_PORT", 6379)))
 
     print(f"🔗 Đang kết nối MongoDB: {mongo_uri}")
     mongo_client = MongoClient(mongo_uri)
-    # LƯU Ý: Đổi 'traffic_system' thành tên Database thật của bạn nếu khác
-    db = mongo_client["traffic_system"] 
+    db = mongo_client["traffic_system"]
     real_mongo_collection = db["assigned_routes"]
 
     print(f"🔗 Đang kết nối Redis: {redis_host}:{redis_port}")
@@ -385,26 +550,30 @@ if __name__ == "__main__":
     # 2. Vòng lặp vĩnh cửu của Kubernetes
     while True:
         try:
-            # Lấy danh sách toàn bộ xe tải đang hoạt động từ MongoDB
-            # (Giả sử bạn chỉ muốn tối ưu cho Truck, hoặc lấy toàn bộ nếu collection chỉ chứa xe tải)
-            trucks_cursor = real_mongo_collection.find({}) 
+            trucks_cursor = real_mongo_collection.find({})
             vehicle_docs = list(trucks_cursor)
 
             if vehicle_docs:
-                # Gọi hàm tối ưu xịn sò của bạn
                 result = optimize_many_vehicles(
                     vehicle_docs=vehicle_docs,
                     redis_client=real_redis_client,
                     mongo_collection=real_mongo_collection,
-                    force=False # Chỉ chạy lại thuật toán GA khi đường bị kẹt (theo logic của bạn)
+                    force=False,
                 )
-                
-                # In log cho đẹp để dễ theo dõi trong Terminal
+
                 if result["optimized_count"] > 0:
-                    print(f"[CẬP NHẬT] Đã tính toán lại đường đi cho {result['optimized_count']} xe do kẹt xe!")
-            
+                    print(
+                        f"[CẬP NHẬT] Đã tính toán lại đường đi cho "
+                        f"{result['optimized_count']} xe do kẹt xe!"
+                    )
+
+                if result["error_count"] > 0:
+                    print(f"[CẢNH BÁO] Có {result['error_count']} xe lỗi khi tối ưu.")
+                    for item in result["results"]:
+                        if item.get("status") == "error":
+                            print(f"  - {item.get('vehicle_id')}: {item.get('reason')}")
+
         except Exception as e:
             print(f"❌ Lỗi vòng lặp: {e}")
 
-        # Nghỉ ngơi 5 giây trước khi quét lại để không làm cháy CPU
         time.sleep(5)
