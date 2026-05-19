@@ -7,13 +7,13 @@ This version supports both naming styles:
 - entity_id / entity_type from data ingestion and Kafka GPS messages
 - vehicle_id from optimization, MongoDB and dashboard schemas
 
+It also supports both Redis schemas used during development:
+- String JSON: edge:<edge_id> -> '{...}'  (current Spark/RedisWriter format)
+- Hash:        edge:<edge_id> -> HGETALL  (older/local test format)
+
 Important mapping:
     vehicle_id = vehicle_doc["vehicle_id"] if present
               = vehicle_doc["entity_id"] otherwise
-
-Ban fix nay doc duoc ca 2 schema Redis:
-- String JSON: GET edge:<edge_id>
-- Redis hash: HGETALL edge:<edge_id>
 """
 
 from dataclasses import dataclass, asdict
@@ -105,6 +105,23 @@ def _normalize_redis_hash(raw_hash: Dict[Any, Any]) -> Dict[str, Any]:
     return result
 
 
+def _edge_traffic_from_dict(edge_id: str, data: Dict[str, Any]) -> EdgeTraffic:
+    """Convert either Redis JSON payload or Redis hash fields into EdgeTraffic."""
+    return EdgeTraffic(
+        edge_id=edge_id,
+        avg_speed=_to_float(data.get("avg_speed")),
+        estimated_travel_time=_to_float(data.get("estimated_travel_time")),
+        vehicle_count=_to_int(data.get("vehicle_count")),
+        distance=_to_float(data.get("distance")),
+        max_speed=_to_float(data.get("max_speed")),
+        is_congested=_to_bool(data.get("is_congested")),
+        last_updated=_to_int(
+            data.get("last_updated") or data.get("updated_at"),
+            default=0,
+        ),
+    )
+
+
 def get_vehicle_id(vehicle_doc: Dict[str, Any]) -> str:
     return _to_str(vehicle_doc.get("vehicle_id") or vehicle_doc.get("entity_id"))
 
@@ -170,32 +187,32 @@ def get_blocked_edges(redis_client: Any) -> List[str]:
     return sorted(set(blocked_edges))
 
 
-def _read_edge_json(redis_client: Any, key: str) -> Optional[Dict[str, Any]]:
+def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
     """
-    Redis writer hien tai co the ghi edge:<id> bang SET JSON.
-    Neu key that ra la hash, redis.get se co the throw WRONGTYPE -> return None.
+    Read traffic state for one edge.
+
+    Current Spark RedisWriter stores Redis keys as JSON strings:
+        SET edge:<edge_id> '{"avg_speed": ..., ...}' EX 120
+
+    Older tests may store the same key as a Redis hash:
+        HSET edge:<edge_id> avg_speed ...
+
+    This function supports both, trying GET JSON first and falling back to HGETALL.
     """
+    key = f"edge:{edge_id}"
+
+    # 1) Current format: Redis string containing JSON
     try:
-        raw = redis_client.get(key)
+        raw_json = redis_client.get(key)
+        raw_json = _decode(raw_json)
+        if raw_json:
+            data = json.loads(raw_json)
+            if isinstance(data, dict):
+                return _edge_traffic_from_dict(edge_id, data)
     except Exception:
-        return None
+        pass
 
-    if not raw:
-        return None
-
-    try:
-        raw = _decode(raw)
-        parsed = json.loads(raw)
-    except Exception:
-        return None
-
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _read_edge_hash(redis_client: Any, key: str) -> Optional[Dict[str, Any]]:
-    """
-    Backward compatible voi schema cu dung HGETALL edge:<id>.
-    """
+    # 2) Backward-compatible format: Redis hash
     try:
         raw_hash = redis_client.hgetall(key)
     except Exception:
@@ -204,29 +221,8 @@ def _read_edge_hash(redis_client: Any, key: str) -> Optional[Dict[str, Any]]:
     if not raw_hash:
         return None
 
-    return _normalize_redis_hash(raw_hash)
-
-
-def get_edge_traffic(redis_client: Any, edge_id: str) -> Optional[EdgeTraffic]:
-    key = f"edge:{edge_id}"
-
-    data = _read_edge_json(redis_client, key)
-    if data is None:
-        data = _read_edge_hash(redis_client, key)
-
-    if data is None:
-        return None
-
-    return EdgeTraffic(
-        edge_id=edge_id,
-        avg_speed=_to_float(data.get("avg_speed")),
-        estimated_travel_time=_to_float(data.get("estimated_travel_time")),
-        vehicle_count=_to_int(data.get("vehicle_count")),
-        distance=_to_float(data.get("distance")),
-        max_speed=_to_float(data.get("max_speed") or data.get("max_speed_kmh")),
-        is_congested=_to_bool(data.get("is_congested")),
-        last_updated=_to_int(data.get("last_updated"), default=0),
-    )
+    data = _normalize_redis_hash(raw_hash)
+    return _edge_traffic_from_dict(edge_id, data)
 
 
 def build_traffic_snapshot(redis_client: Any, edge_ids: List[str]) -> Dict[str, EdgeTraffic]:
@@ -358,9 +354,30 @@ def should_trigger_reroute(
 
 
 class FakeRedis:
-    def __init__(self):
+    def __init__(self, mode: str = "json"):
+        self.mode = mode
         self.sets = {
             "blocked_edges": {"E_106_TaySon"}
+        }
+        self.json_values = {
+            "edge:E_105_NgTrai": json.dumps({
+                "avg_speed": 25.0,
+                "estimated_travel_time": 30.5,
+                "vehicle_count": 20,
+                "distance": 210.0,
+                "max_speed": 50,
+                "is_congested": False,
+                "last_updated": 1711864800000,
+            }),
+            "edge:E_106_TaySon": json.dumps({
+                "avg_speed": 3.5,
+                "estimated_travel_time": 200.0,
+                "vehicle_count": 120,
+                "distance": 700.0,
+                "max_speed": 50,
+                "is_congested": True,
+                "last_updated": 1711864800000,
+            }),
         }
         self.hashes = {
             "edge:E_105_NgTrai": {
@@ -382,26 +399,19 @@ class FakeRedis:
                 "last_updated": "1711864800000",
             },
         }
-        self.strings = {
-            "edge:E_JSON_DEMO": json.dumps({
-                "avg_speed": 12.0,
-                "estimated_travel_time": 42.0,
-                "vehicle_count": 9,
-                "distance": 120.0,
-                "max_speed_kmh": 40.0,
-                "is_congested": False,
-                "last_updated": 1711864800000,
-            })
-        }
 
     def smembers(self, key: str):
         return self.sets.get(key, set())
 
     def get(self, key: str):
-        return self.strings.get(key)
+        if self.mode == "json":
+            return self.json_values.get(key)
+        return None
 
     def hgetall(self, key: str):
-        return self.hashes.get(key, {})
+        if self.mode == "hash":
+            return self.hashes.get(key, {})
+        return {}
 
 
 if __name__ == "__main__":
@@ -425,12 +435,14 @@ if __name__ == "__main__":
         ],
     }
 
-    redis_client = FakeRedis()
-    opt_input = build_optimization_input(vehicle_doc, redis_client)
-    validate_optimization_input(opt_input)
+    for mode in ("json", "hash"):
+        print(f"\n=== Testing Redis {mode} mode ===")
+        redis_client = FakeRedis(mode=mode)
+        opt_input = build_optimization_input(vehicle_doc, redis_client)
+        validate_optimization_input(opt_input)
 
-    print("Normalized optimization input:")
-    print(opt_input)
+        print("Normalized optimization input:")
+        print(opt_input)
 
-    print("\nShould trigger reroute?")
-    print(should_trigger_reroute(opt_input))
+        print("\nShould trigger reroute?")
+        print(should_trigger_reroute(opt_input))
