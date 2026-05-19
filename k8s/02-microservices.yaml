@@ -71,7 +71,7 @@ spec:
     spec:
       containers:
         - name: route-optimization
-          image: logictics-opt:v4
+          image: logictics-opt:v5
           imagePullPolicy: IfNotPresent
           env:
             - name: PYTHONUNBUFFERED
@@ -115,7 +115,7 @@ spec:
     spec:
       containers:
         - name: dashboard-backend
-          image: logictics-backend:v5
+          image: logictics-backend:v6
           imagePullPolicy: IfNotPresent
           env:
             - name: REDIS_HOST
@@ -159,7 +159,7 @@ spec:
     spec:
       containers:
         - name: dashboard-frontend
-          image: logictics-frontend:v2
+          image: logictics-frontend:v3
           imagePullPolicy: IfNotPresent
           env:
             - name: BACKEND_INTERNAL_URL

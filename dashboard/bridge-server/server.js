@@ -5,6 +5,7 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const redis = require("redis");
 const { Kafka } = require("kafkajs");
+const PathFinder = require("./pathfinder");
 
 const app = express();
 app.use(cors());
@@ -15,6 +16,15 @@ const io = new Server(server, {
 });
 
 // --- CẤU HÌNH KẾT NỐI (K8s Service names) ---
+// --- PATHFINDER (tính route shortest-path on-demand) ---
+const pathfinder = new PathFinder();
+const EDGES_PATH = process.env.EDGES_JSON || "/app/data/edges_schema.json";
+try {
+  pathfinder.load(EDGES_PATH);
+} catch (err) {
+  console.warn("⚠️ PathFinder: Không load được edges:", err.message);
+}
+
 const MONGO_URI = process.env.MONGO_URI || "mongodb://mongodb:27017/traffic_system?replicaSet=rs0";
 const REDIS_URL = process.env.REDIS_HOST ? `redis://${process.env.REDIS_HOST}:6379` : "redis://redis.default.svc.cluster.local:6379";
 const KAFKA_BROKER = process.env.KAFKA_BROKER || "kafka:9092";
@@ -118,6 +128,7 @@ runKafkaForever();
 // --- MONGODB CHANGE STREAMS (Lộ trình GA) ---
 const RouteModel = mongoose.model("Route", new mongoose.Schema({
   vehicle_id: String,
+  assigned_route: [String],
   new_assigned_route: [String],
   estimated_total_travel_time: Number,
 }), "assigned_routes");
@@ -127,9 +138,12 @@ function setupChangeStreams() {
     RouteModel.watch([], { fullDocument: "updateLookup" }).on("change", (change) => {
       const updatedData = change.fullDocument;
       if (updatedData) {
+        const path = (updatedData.new_assigned_route && updatedData.new_assigned_route.length > 0)
+          ? updatedData.new_assigned_route
+          : updatedData.assigned_route || [];
         io.emit("route_optimized", {
           vehicle_id: updatedData.vehicle_id,
-          path: updatedData.new_assigned_route,
+          path,
           time: updatedData.estimated_total_travel_time,
         });
       }
@@ -143,19 +157,27 @@ function setupChangeStreams() {
 async function emitRoutesSnapshot(socket) {
   if (!mongoReady) return;
   try {
+    // Query tất cả xe có route (new_assigned_route HOẶC assigned_route)
     const docs = await RouteModel.find({
       vehicle_id: { $exists: true, $nin: [null, ""] },
-      "new_assigned_route.0": { $exists: true },
+      $or: [
+        { "new_assigned_route.0": { $exists: true } },
+        { "assigned_route.0": { $exists: true } },
+      ]
     })
-      .select("vehicle_id new_assigned_route estimated_total_travel_time")
+      .select("vehicle_id assigned_route new_assigned_route estimated_total_travel_time")
       .lean();
     const payload = docs
-      .filter((d) => d.vehicle_id && Array.isArray(d.new_assigned_route) && d.new_assigned_route.length)
+      .filter((d) => d.vehicle_id)
       .map((d) => ({
         vehicle_id: d.vehicle_id,
-        path: d.new_assigned_route,
+        old_path: d.assigned_route || [],
+        new_path: d.new_assigned_route || [],
+        path: (d.new_assigned_route && d.new_assigned_route.length > 0)
+          ? d.new_assigned_route : (d.assigned_route || []),
         time: d.estimated_total_travel_time,
-      }));
+      }))
+      .filter((d) => d.path.length > 0);
     socket.emit("routes_snapshot", payload);
   } catch (e) {
     console.error("routes_snapshot:", e.message);
@@ -168,22 +190,66 @@ io.on("connection", (socket) => {
 
   emitRoutesSnapshot(socket);
 
+  // --- REQUEST ROUTE ON-DEMAND ---
+  // Frontend gửi event khi user chọn xe → tính shortest path realtime
+  socket.on("request_route", async (data) => {
+    try {
+      const { vehicle_id, lat, lon } = data;
+      if (!vehicle_id || lat === undefined || lon === undefined) {
+        socket.emit("route_result", { vehicle_id, error: "Missing lat/lon" });
+        return;
+      }
+
+      // Lấy remaining_customers từ MongoDB
+      let customers = data.customers || [];
+      if (customers.length === 0 && mongoReady) {
+        const doc = await RouteModel.findOne({ vehicle_id }).lean();
+        if (doc && doc.remaining_customers) {
+          customers = doc.remaining_customers;
+        }
+      }
+
+      if (customers.length === 0) {
+        socket.emit("route_result", { vehicle_id, path: [], time: 0, error: "No customers" });
+        return;
+      }
+
+      if (!pathfinder.loaded) {
+        socket.emit("route_result", { vehicle_id, path: [], time: 0, error: "PathFinder not loaded" });
+        return;
+      }
+
+      // Tính shortest path liên tục từ vị trí xe → qua tất cả customer
+      const result = pathfinder.buildRoute(lat, lon, customers);
+
+      socket.emit("route_result", {
+        vehicle_id,
+        path: result.path,
+        time: Math.round(result.totalCost), // seconds
+        customers,
+      });
+      console.log(`🗺️ Route calculated for ${vehicle_id}: ${result.path.length} edges, ${Math.round(result.totalCost)}s`);
+    } catch (err) {
+      console.error("request_route error:", err.message);
+      socket.emit("route_result", { vehicle_id: data?.vehicle_id, path: [], error: err.message });
+    }
+  });
+
   const trafficInterval = setInterval(async () => {
     if (!redisReady) return; // Bỏ qua nếu Redis chưa sẵn sàng
     try {
-      // Dùng SCAN thay vì KEYS (non-blocking) + MGET batch
-      const keys = [];
-      for await (const key of redisClient.scanIterator({ MATCH: "edge:*", COUNT: 200 })) {
-        keys.push(key);
-      }
-      if (keys.length > 0) {
-        const values = await redisClient.mGet(keys);
+      // Dùng KEYS + GET từng key (ổn định, tránh lỗi Buffer với scanIterator/mGet)
+      const keys = await redisClient.keys("edge:*");
+      if (keys && keys.length > 0) {
         const trafficBatch = [];
-        for (let i = 0; i < keys.length; i++) {
-          if (values[i]) {
-            const payload = JSON.parse(values[i]);
-            trafficBatch.push({ edge_id: keys[i].replace("edge:", ""), avg_speed: payload.avg_speed || 0 });
-          }
+        for (const key of keys) {
+          try {
+            const rawData = await redisClient.get(String(key));
+            if (rawData) {
+              const payload = JSON.parse(rawData);
+              trafficBatch.push({ edge_id: String(key).replace("edge:", ""), avg_speed: payload.avg_speed || 0 });
+            }
+          } catch (_) { /* skip */ }
         }
         if (trafficBatch.length > 0) {
           socket.emit("traffic_batch", trafficBatch);

@@ -26,6 +26,7 @@ spec:
       containers:
       - name: zookeeper
         image: confluentinc/cp-zookeeper:7.3.0
+        imagePullPolicy: IfNotPresent
         env:
         - name: ZOOKEEPER_CLIENT_PORT
           value: "2181"
@@ -62,6 +63,7 @@ spec:
       containers:
       - name: kafka
         image: confluentinc/cp-kafka:7.3.0
+        imagePullPolicy: IfNotPresent
         env:
         - name: KAFKA_BROKER_ID
           value: "1"
@@ -103,6 +105,7 @@ spec:
       containers:
       - name: redis
         image: redis:7.0-alpine
+        imagePullPolicy: IfNotPresent
         command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
 
 # ================= MONGODB =================
@@ -134,4 +137,5 @@ spec:
       containers:
       - name: mongodb
         image: mongo:6.0
+        imagePullPolicy: IfNotPresent
         command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]

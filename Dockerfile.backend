@@ -7,6 +7,9 @@ RUN npm install
 
 COPY dashboard/bridge-server/ .
 
+# Copy edges data cho PathFinder (tính route shortest-path)
+COPY dashboard/frontend/src/data/edges_schema.json /app/data/edges_schema.json
+
 # Expose port của Vite (thường là 4000)
 EXPOSE 4000
 

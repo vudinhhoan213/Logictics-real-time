@@ -109,14 +109,20 @@ def write_edge_stats_to_redis(batch_df, batch_id: int):
 
                 estimated_travel_time = (distance / 1000.0) / avg_speed * 3600.0
 
+                # Lấy max_speed từ graph data
+                matcher = get_map_matcher()
+                max_speed = matcher.get_edge_max_speed(edge_id)
+
                 payload = {
                     "edge_id": edge_id,
                     "avg_speed": round(avg_speed, 2),
                     "vehicle_count": int(row["vehicle_count"]),
                     "distance": round(distance, 1),
+                    "max_speed": round(max_speed, 1),
                     "estimated_travel_time": round(estimated_travel_time, 2),
                     "is_congested": avg_speed < CONGESTION_THRESHOLD_KMH,
-                    "updated_at": row["window_end"].isoformat() if row["window_end"] else ""
+                    "updated_at": row["window_end"].isoformat() if row["window_end"] else "",
+                    "last_updated": int(row["window_end"].timestamp() * 1000) if row["window_end"] else 0
                 }
 
                 records_to_write.append(payload)
@@ -236,6 +242,21 @@ def main():
         .foreachBatch(write_edge_stats_to_redis)
         .option("checkpointLocation", "/tmp/spark_checkpoint/gps_stream")
         .trigger(processingTime="3 seconds")
+        .start()
+    )
+
+    # ── 7. Ghi raw GPS data ra Parquet (lưu trữ dài hạn) ─────────────────
+    PARQUET_OUTPUT = os.getenv("PARQUET_OUTPUT", "/tmp/gps_parquet")
+    parquet_query = (
+        matched_df
+        .select("entity_id", "entity_type", "latitude", "longitude",
+                "speed", "timestamp", "event_time", "edge_id")
+        .writeStream
+        .outputMode("append")
+        .format("parquet")
+        .option("path", PARQUET_OUTPUT)
+        .option("checkpointLocation", "/tmp/spark_checkpoint/parquet_sink")
+        .trigger(processingTime="30 seconds")
         .start()
     )
 

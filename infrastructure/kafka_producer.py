@@ -11,7 +11,10 @@ class GPSProducer:
         
         conf = {
             'bootstrap.servers': broker,
-            'client.id': 'python-producer'
+            'client.id': 'python-producer',
+            'linger.ms': 50,           # Batch messages 50ms trước khi gửi
+            'batch.num.messages': 500,  # Batch tối đa 500 messages
+            'queue.buffering.max.messages': 100000,
         }
         
         print(f"--- Đang kết nối tới Kafka Broker tại: {broker} ---")
@@ -19,10 +22,9 @@ class GPSProducer:
         self.topic = 'gps_stream'
 
     def delivery_report(self, err, msg):
-        if err is not None:
-            print(f"[LỖI] Gửi thất bại: {err}")
-        else:
-            print(f"[OK] Đã gửi tới topic {msg.topic()} [{msg.partition()}]")
+        # Chỉ log lỗi, không log success (giảm 99% I/O)
+        if err:
+            print(f"[LỖI] Kafka produce failed: {err}")
 
     def produce_message(self, data_dict):
         json_data = json.dumps(data_dict).encode('utf-8')

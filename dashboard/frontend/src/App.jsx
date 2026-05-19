@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useState, useCallback } from "react";
+import React, { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { MapContainer, TileLayer, Polyline, Popup, Marker, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import "leaflet.heat";
 import edgesData from "./data/edges_schema.json";
 import { io } from "socket.io-client";
 
@@ -47,16 +48,115 @@ function formatEtaMinutes(time) {
 }
 
 function pathToLatLngs(path, edgeLookup) {
-  const points = [];
+  // Trả về MẢNG CÁC SEGMENTS (mỗi segment là 1 polyline liên tục)
+  // Tránh vẽ đường chim bay khi edges không nối tiếp nhau
+  const segments = [];
+  let currentSegment = [];
+
   path.forEach((id, index) => {
     const edge = edgeLookup[id];
     if (!edge) return;
-    if (index === 0) points.push([edge.start_node.lat, edge.start_node.lon]);
-    points.push([edge.end_node.lat, edge.end_node.lon]);
+
+    const start = [edge.start_node.lat, edge.start_node.lon];
+    const end = [edge.end_node.lat, edge.end_node.lon];
+
+    if (currentSegment.length === 0) {
+      // Bắt đầu segment mới
+      currentSegment.push(start, end);
+    } else {
+      // Kiểm tra edge hiện tại có nối tiếp edge trước không
+      const lastPoint = currentSegment[currentSegment.length - 1];
+      const isContinuous =
+        Math.abs(lastPoint[0] - start[0]) < 0.0001 &&
+        Math.abs(lastPoint[1] - start[1]) < 0.0001;
+
+      if (isContinuous) {
+        currentSegment.push(end);
+      } else {
+        // Ngắt segment, bắt đầu segment mới
+        if (currentSegment.length >= 2) segments.push(currentSegment);
+        currentSegment = [start, end];
+      }
+    }
   });
-  return points;
+
+  if (currentSegment.length >= 2) segments.push(currentSegment);
+  return segments;
 }
 
+// Giữ hàm cũ cho traffic edges (1 edge = 1 polyline, không cần segment)
+function edgeToLatLngs(edge) {
+  return [
+    [edge.start_node.lat, edge.start_node.lon],
+    [edge.end_node.lat, edge.end_node.lon],
+  ];
+}
+
+/**
+ * Tìm index của edge trong path gần nhất với vị trí GPS (lat, lon).
+ * Dùng để chia route thành phần đã đi và phần phía trước.
+ */
+function findCurrentEdgeIndex(path, edgeLookup, lat, lon) {
+  let bestIdx = 0;
+  let bestDist = Infinity;
+  for (let i = 0; i < path.length; i++) {
+    const edge = edgeLookup[path[i]];
+    if (!edge) continue;
+    // Khoảng cách tới midpoint của edge
+    const midLat = (edge.start_node.lat + edge.end_node.lat) / 2;
+    const midLon = (edge.start_node.lon + edge.end_node.lon) / 2;
+    const d = (midLat - lat) ** 2 + (midLon - lon) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+/**
+ * Chia route path thành 2 phần: đã đi qua (traversed) và phía trước (upcoming)
+ * dựa trên vị trí GPS hiện tại của xe.
+ */
+function splitRouteAtVehicle(path, edgeLookup, lat, lon) {
+  if (!path || path.length === 0 || lat == null || lon == null) {
+    return { traversed: [], upcoming: path || [] };
+  }
+  const idx = findCurrentEdgeIndex(path, edgeLookup, lat, lon);
+  return {
+    traversed: path.slice(0, idx),
+    upcoming: path.slice(idx),
+  };
+}
+
+/**
+ * Zoom fit lộ trình 1 LẦN khi chọn xe (không re-fit khi xe di chuyển).
+ * Chỉ zoom lại khi selectedVehicleId thay đổi.
+ */
+function MapFitRoute({ routeSegments, vehiclePos, selectedId }) {
+  const map = useMap();
+  const lastFitId = useRef(null);
+
+  useEffect(() => {
+    // Chỉ fit 1 lần khi selectedId thay đổi
+    if (!selectedId || lastFitId.current === selectedId) return;
+    lastFitId.current = selectedId;
+
+    const points = [];
+    if (vehiclePos) points.push(vehiclePos);
+    if (routeSegments) {
+      for (const seg of routeSegments) for (const pt of seg) points.push(pt);
+    }
+    if (points.length === 0) return;
+
+    const bounds = L.latLngBounds(points);
+    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 17, duration: 0.6 });
+  }, [map, selectedId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return null;
+}
+
+// Giữ MapFlyTo cho fallback khi chưa có route
 function MapFlyTo({ lat, lon, zoom = 16 }) {
   const map = useMap();
   useEffect(() => {
@@ -65,6 +165,77 @@ function MapFlyTo({ lat, lon, zoom = 16 }) {
   }, [map, lat, lon, zoom]);
   return null;
 }
+
+// ─── Heatmap Layer: hiển thị mật độ tắc đường ────────────────────────
+function HeatmapLayer({ trafficData, edgeLookup }) {
+  const map = useMap();
+  const heatLayerRef = useRef(null);
+
+  useEffect(() => {
+    // Tạo heatmap data: mỗi edge có tắc đường → thêm điểm nóng
+    const points = [];
+    for (const [edgeId, avgSpeed] of Object.entries(trafficData)) {
+      const edge = edgeLookup[edgeId];
+      if (!edge) continue;
+      // Intensity: tốc độ thấp → nóng hơn (max intensity khi speed ≤ 5)
+      const intensity = Math.max(0, 1 - avgSpeed / 30); // 0→30 km/h map to 1→0
+      if (intensity > 0.1) {
+        const midLat = (edge.start_node.lat + edge.end_node.lat) / 2;
+        const midLon = (edge.start_node.lon + edge.end_node.lon) / 2;
+        points.push([midLat, midLon, intensity]);
+      }
+    }
+
+    if (heatLayerRef.current) map.removeLayer(heatLayerRef.current);
+    if (points.length > 0) {
+      heatLayerRef.current = L.heatLayer(points, { radius: 25, blur: 15, maxZoom: 17, max: 1.0 }).addTo(map);
+    }
+
+    return () => { if (heatLayerRef.current) map.removeLayer(heatLayerRef.current); };
+  }, [map, trafficData, edgeLookup]);
+
+  return null;
+}
+
+// ─── Traffic Edges: chỉ render edges CÓ data Redis (tối ưu performance) ──
+const TrafficEdges = React.memo(function TrafficEdges({ trafficData, edgeLookup, dimmed }) {
+  // Render TẤT CẢ edges: xám mặc định, tô màu khi có data Redis
+  const edgesToRender = useMemo(() => {
+    const result = [];
+    for (const edge of edgesData) {
+      const edgeId = edge.edge_id;
+      const avgSpeed = trafficData[edgeId];
+      let color = "#d1d5db"; // xám nhạt mặc định (chưa có data)
+      let weight = 2;
+      if (avgSpeed !== undefined) {
+        color = avgSpeed <= 5 ? "#ef4444" : avgSpeed <= 15 ? "#f97316" : "#22c55e";
+        weight = 3;
+      }
+      result.push({
+        key: edgeId,
+        positions: [
+          [edge.start_node.lat, edge.start_node.lon],
+          [edge.end_node.lat, edge.end_node.lon],
+        ],
+        color,
+        weight,
+      });
+    }
+    return result;
+  }, [trafficData, edgeLookup]);
+
+  return (
+    <>
+      {edgesToRender.map((e) => (
+        <Polyline
+          key={e.key}
+          positions={e.positions}
+          pathOptions={{ color: e.color, weight: e.weight, opacity: dimmed ? 0.2 : 0.7 }}
+        />
+      ))}
+    </>
+  );
+});
 
 function TruckMarker({ vehicle, routeColor, hasRoute, isSelected, onSelect }) {
   const rawSpd = Number(vehicle.speed) || 0;
@@ -113,6 +284,8 @@ function App() {
   const [routesByVehicle, setRoutesByVehicle] = useState({});
   const [selectedVehicleId, setSelectedVehicleId] = useState(null);
   const [routeFilter, setRouteFilter] = useState("");
+  const [showHeatmap, setShowHeatmap] = useState(true);
+  const socketRef = useRef(null);
 
   const edgeLookup = useMemo(() => {
     const map = {};
@@ -133,7 +306,7 @@ function App() {
           delete next[vid];
           continue;
         }
-        next[vid] = { path, time: item.time };
+        next[vid] = { path, old_path: item.old_path || [], new_path: item.new_path || [], time: item.time };
       }
       return next;
     });
@@ -141,6 +314,7 @@ function App() {
 
   useEffect(() => {
     const socket = io(SOCKET_URL, { transports: ["polling", "websocket"] });
+    socketRef.current = socket;
 
     // Legacy: từng event đơn lẻ (tương thích ngược)
     socket.on("traffic_update", (data) => {
@@ -176,7 +350,17 @@ function App() {
       mergeRoutes([data]);
     });
 
-    return () => socket.disconnect();
+    // Nhận route_result từ backend PathFinder
+    socket.on("route_result", (data) => {
+      if (data.path && data.path.length > 0) {
+        mergeRoutes([{ vehicle_id: data.vehicle_id, path: data.path, time: data.time }]);
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
   }, [mergeRoutes]);
 
   const routeEntries = useMemo(() => {
@@ -201,8 +385,24 @@ function App() {
   const selectedColor = selectedVehicleId ? hashHue(selectedVehicleId) : null;
 
   const selectVehicle = useCallback((vid) => {
-    setSelectedVehicleId((prev) => (prev === vid ? null : vid));
-  }, []);
+    setSelectedVehicleId((prev) => {
+      const newVid = prev === vid ? null : vid;
+
+      // Khi chọn xe → request tính route từ vị trí hiện tại qua các customer
+      if (newVid && socketRef.current) {
+        const v = vehicles[newVid];
+        if (v && v.lat && v.lon) {
+          socketRef.current.emit("request_route", {
+            vehicle_id: newVid,
+            lat: v.lat,
+            lon: v.lon,
+          });
+        }
+      }
+
+      return newVid;
+    });
+  }, [vehicles]);
 
   return (
     <div style={{ height: "100vh", width: "100vw", position: "relative" }}>
@@ -315,18 +515,32 @@ function App() {
         }}
       >
         <div style={{ fontWeight: 700, marginBottom: 6 }}>Màu tuyến (Redis)</div>
-        <div><span style={{ color: "#3b82f6", fontWeight: 700 }}>■</span> Chưa có dữ liệu</div>
+        <div><span style={{ color: "#d1d5db", fontWeight: 700 }}>■</span> Chưa có dữ liệu</div>
         <div><span style={{ color: "#22c55e", fontWeight: 700 }}>■</span> &gt; 15 km/h</div>
         <div><span style={{ color: "#f97316", fontWeight: 700 }}>■</span> 5–15 km/h</div>
         <div><span style={{ color: "#ef4444", fontWeight: 700 }}>■</span> ≤ 5 km/h</div>
-        <div style={{ marginTop: 8, fontWeight: 700 }}>Lộ trình GA (đang chọn)</div>
+
+        <div style={{ marginTop: 8 }}>
+          <label style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={showHeatmap}
+              onChange={(e) => setShowHeatmap(e.target.checked)}
+            />
+            <span style={{ fontWeight: 600 }}>🔥 Heatmap tắc đường</span>
+          </label>
+        </div>
+
+        <div style={{ marginTop: 8, fontWeight: 700 }}>Lộ trình (khi chọn xe)</div>
         {selectedVehicleId && selectedColor ? (
           <div style={{ marginTop: 4 }}>
-            <span style={{ color: selectedColor, fontWeight: 700 }}>━━</span> {selectedVehicleId}
+            <strong>{selectedVehicleId}</strong>
             <br />
             ETA: {selectedRoute ? formatEtaMinutes(selectedRoute.time) : "—"}
             <br />
-            <span style={{ color: "#666" }}>Các tuyến khác mờ khi đã chọn xe.</span>
+            <span style={{ color: "#2563eb", fontWeight: 700 }}>- - -</span> Đường cũ (trước GA)
+            <br />
+            <span style={{ color: "#ef4444", fontWeight: 700 }}>━━</span> Đường mới (sau GA)
           </div>
         ) : (
           <div style={{ color: "#666" }}>Chọn Truck_001… ở panel trái hoặc bấm xe trên map.</div>
@@ -336,47 +550,78 @@ function App() {
       <MapContainer center={[21.0262, 105.8375]} zoom={15} style={{ height: "100%", width: "100%" }} preferCanvas>
         <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
 
-        {selectedVehicle && <MapFlyTo lat={selectedVehicle.lat} lon={selectedVehicle.lon} />}
+        {/* Heatmap layer - bản đồ nhiệt mật độ tắc đường */}
+        {showHeatmap && <HeatmapLayer trafficData={trafficData} edgeLookup={edgeLookup} />}
 
-        {edgesData.map((edge) => {
-          const speed = trafficData[edge.edge_id];
-          const roadColor =
-            speed !== undefined ? (speed <= 5 ? "#ef4444" : speed <= 15 ? "#f97316" : "#22c55e") : "#3b82f6";
+        {/* Zoom fit route khi chọn xe */}
+        {selectedVehicleId && selectedRoute && (() => {
+          const allSegs = pathToLatLngs(selectedRoute.path, edgeLookup);
+          const vPos = selectedVehicle ? [selectedVehicle.lat, selectedVehicle.lon] : null;
+          return <MapFitRoute routeSegments={allSegs} vehiclePos={vPos} selectedId={selectedVehicleId} />;
+        })()}
+        {/* Fallback: chọn xe chưa có route → fly tới vị trí xe */}
+        {selectedVehicleId && !selectedRoute && selectedVehicle && (
+          <MapFlyTo lat={selectedVehicle.lat} lon={selectedVehicle.lon} />
+        )}
+
+        {/* Traffic edges — chỉ render edges CÓ dữ liệu Redis (tiết kiệm render) */}
+        <TrafficEdges trafficData={trafficData} edgeLookup={edgeLookup} dimmed={!!selectedVehicleId} />
+
+        {/* Route rendering: xe được chọn hiện kiểu Google Maps, xe khác mờ */}
+        {/* Route xe được chọn: XANH DƯƠNG = đường cũ, ĐỎ = đường mới (sau GA) */}
+        {selectedVehicleId && selectedRoute && (() => {
+          const r = selectedRoute;
+          const oldSegs = pathToLatLngs(r.old_path, edgeLookup);
+          const newSegs = pathToLatLngs(r.new_path.length > 0 ? r.new_path : r.path, edgeLookup);
+
           return (
-            <Polyline
-              key={edge.edge_id}
-              positions={[
-                [edge.start_node.lat, edge.start_node.lon],
-                [edge.end_node.lat, edge.end_node.lon],
-              ]}
-              pathOptions={{ color: roadColor, weight: 3, opacity: selectedVehicleId ? 0.35 : 1 }}
-            />
+            <>
+              {/* Đường cũ (assigned_route) — XANH DƯƠNG, nét đứt */}
+              {oldSegs.map((seg, idx) => (
+                <Polyline
+                  key={`old-${idx}`}
+                  positions={seg}
+                  pathOptions={{
+                    color: "#2563eb",
+                    weight: 5,
+                    opacity: 0.7,
+                    dashArray: "10 6",
+                  }}
+                />
+              ))}
+              {/* Đường mới (new_assigned_route sau GA) — ĐỎ, nét liền đậm */}
+              {newSegs.map((seg, idx) => (
+                <Polyline
+                  key={`new-${idx}`}
+                  positions={seg}
+                  pathOptions={{
+                    color: "#ef4444",
+                    weight: 6,
+                    opacity: 0.9,
+                  }}
+                >
+                  {idx === 0 && (
+                    <Popup>
+                      <strong>{selectedVehicleId}</strong>
+                      <br />
+                      ETA: {formatEtaMinutes(r.time)}
+                      <br />
+                      <span style={{color:"#2563eb"}}>━━</span> Đường cũ ({r.old_path.length} cạnh)
+                      <br />
+                      <span style={{color:"#ef4444"}}>━━</span> Đường tối ưu ({(r.new_path.length || r.path.length)} cạnh)
+                    </Popup>
+                  )}
+                </Polyline>
+              ))}
+            </>
           );
-        })}
-
-        {routeEntries.map(([vid, r]) => {
-          const positions = pathToLatLngs(r.path, edgeLookup);
-          if (positions.length === 0) return null;
-          const color = hashHue(vid);
-          const isSel = vid === selectedVehicleId;
-          const dimOthers = selectedVehicleId && !isSel;
-          return (
-            <Polyline
-              key={vid}
-              positions={positions}
-              pathOptions={{
-                color,
-                weight: isSel ? 9 : 4,
-                opacity: dimOthers ? 0.12 : isSel ? 1 : 0.75,
-              }}
-            >
-              <Popup>
-                {vid}
-                <br />
-                ETA: {formatEtaMinutes(r.time)}
-              </Popup>
+        })()}
+                  <br />
+                  ETA: {formatEtaMinutes(r.time)}
+                </Popup>
+              )}
             </Polyline>
-          );
+          ));
         })}
 
         {truckList.map((v) => (

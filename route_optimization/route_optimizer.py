@@ -33,6 +33,8 @@ from optimizer_input_adapter import (
 
 from genetic_algorithm import run_genetic_algorithm
 
+from graph_network import GraphNetwork
+from route_builder import build_route
 
 DEFAULT_MIN_AVG_SPEED = 5.0
 DEFAULT_POPULATION_SIZE = 30
@@ -95,24 +97,37 @@ def build_new_assigned_route(
     opt_input: Dict[str, Any],
 ) -> list:
     """
-    Tao route edge_id moi cho dashboard.
-
-    Hien tai:
-    - GA chi tra ve optimized_customer_order.
-    - Chua co module convert customer order -> shortest path edge list.
-    - Do do tam thoi tra ve old_assigned_route de dashboard nhan duoc
-      new_assigned_route hop le va ve duoc Polyline.
-
-    Sau nay nang cap:
-    - Load graph edges_schema.json.
-    - Map customer toa do -> nearest edge/node.
-    - Dung NetworkX shortest_path voi cost tu Redis.
-    - Tra ve list edge_id moi.
+    Tao route edge_id moi cho dashboard bang shortest path thuc su.
+    Dung GraphNetwork + build_route de tim duong di ngan nhat
+    qua cac customer theo thu tu GA da toi uu.
     """
-    if old_assigned_route:
-        return old_assigned_route
+    import os
+    edges_path = os.getenv("EDGES_JSON", "/app/data/edges_schema.json")
 
-    return []
+    try:
+        graph = GraphNetwork()
+        graph.load_from_schema(edges_path)
+
+        # Lay start_edge tu opt_input
+        start_edge = opt_input.get("current_edge_id") or opt_input.get("edge_id", "")
+
+        # Lay customer order da toi uu boi GA
+        optimized_customers = ga_result.get("optimized_customer_order", [])
+        if not optimized_customers:
+            optimized_customers = opt_input.get("remaining_customers", [])
+
+        if not start_edge or not optimized_customers:
+            return old_assigned_route or []
+
+        # Tim shortest path lien tuc qua cac customer
+        blocked_edges = opt_input.get("blocked_edges", [])
+        new_route = build_route(graph, start_edge, optimized_customers, blocked_edges=blocked_edges)
+
+        return new_route if new_route else (old_assigned_route or [])
+    except Exception as e:
+        print(f"[build_new_assigned_route] Error: {e}, fallback to old_assigned_route")
+        return old_assigned_route or []
+
 
 
 def save_optimization_result_to_mongo(
